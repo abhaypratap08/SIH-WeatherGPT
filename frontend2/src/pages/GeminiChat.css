@@ -547,8 +547,14 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, input:focus-vis
   to { opacity: 1; transform: translateY(0); }
 }
 
-.message-row.user { justify-content: flex-end; }
-.message-row.assistant { justify-content: flex-start; }
+.message-row.user {
+  justify-content: flex-end;
+}
+
+.message-row.assistant {
+  justify-content: flex-start;
+  align-items: flex-start;
+}
 
 .assistant-avatar {
   width: 28px;
@@ -582,6 +588,12 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, input:focus-vis
 .message-bubble-container {
   max-width: min(78%, 760px);
   min-width: 0;
+  align-self: flex-start;
+  text-align: left;
+}
+
+.message-row.user .message-bubble-container {
+  align-self: flex-end;
 }
 
 .user-bubble {
@@ -593,6 +605,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, input:focus-vis
   border-top-right-radius: 4px;
   font-size: 14px;
   line-height: 1.55;
+  text-align: left;
 }
 
 .user-bubble p {
@@ -607,16 +620,28 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, input:focus-vis
   border-radius: var(--radius-lg);
   border-top-left-radius: 4px;
   padding: 12px 15px;
+  text-align: left;
 }
 
 .assistant-content {
   color: var(--text-primary);
   font-size: 14px;
   line-height: 1.65;
+  text-align: left;
+}
+
+.assistant-content * {
+  text-align: left;
 }
 
 .assistant-content p { margin: 0 0 8px 0; }
 .assistant-content p:last-child { margin-bottom: 0; }
+
+.assistant-content ul,
+.assistant-content ol {
+  padding-left: 20px;
+  margin: 0 0 8px 0;
+}
 
 .loading-row {
   display: flex;
