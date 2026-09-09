@@ -39,10 +39,17 @@ app.add_middleware(
 # INITIALIZATION (OLLAMA / LANGCHAIN AGENT)
 # =========================================================
 
-agent = build_agent(
-    model_name="gemma4",
-    base_url="http://localhost:11434",
-)
+# Model is configurable via OLLAMA_MODEL env var (default: llama3.2).
+# Lazy-initialise so the server starts even if Ollama isn't running yet —
+# it will fail gracefully at request time, not at startup.
+_agent_instance = None
+
+
+def get_agent():
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = build_agent()  # reads OLLAMA_MODEL / OLLAMA_BASE_URL env vars
+    return _agent_instance
 
 
 # =========================================================
@@ -262,7 +269,7 @@ def weather_agent(request: AgentRequest):
         }
     )
 
-    result = agent.invoke({"messages": messages})
+    result = get_agent().invoke({"messages": messages})
 
     response = result["messages"][-1].content
 
