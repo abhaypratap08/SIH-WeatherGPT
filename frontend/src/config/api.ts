@@ -8,6 +8,8 @@
  * so all requests go through the same origin (no CORS issues).
  */
 
+// export const JAVA_API_BASE   = "https://sih-weathergpt-production.up.railway.app";   // proxied: /api → localhost:8080
+// export const ML_API_BASE     = "https://bubbly-abundance-production-4c2a.up.railway.app";   // proxied: /agent, /route-weather → localhost:8000
 export const JAVA_API_BASE   = "";   // proxied: /api → localhost:8080
 export const ML_API_BASE     = "";   // proxied: /agent, /route-weather → localhost:8000
 

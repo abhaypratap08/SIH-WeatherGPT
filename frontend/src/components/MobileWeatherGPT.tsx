@@ -344,6 +344,64 @@ export default function MobileWeatherGPT() {
    * Each fresh fix also immediately refreshes the advisory
    * data for the Agriculture, Smart City and Marine sectors.
    */
+  /*
+   * Fetch advisories for a GPS location and post them to the chat.
+   */
+  const loadAdvisoriesForLocation = useCallback(async (latitude: number, longitude: number) => {
+    setIsLoading(true);
+
+    const userMessage: ChatMessage = {
+      id: Date.now().toString(),
+      role: "user",
+      content: `📍 My GPS location: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+      timestamp: new Date(),
+    };
+
+    setMessages((previous) => [...previous, userMessage]);
+
+    try {
+      const response = await fetchJson<any>(
+        `${API_BASE_URL}/api/weather/advisories?latitude=${latitude}&longitude=${longitude}&sector=all`
+      );
+
+      if (response.success && response.data) {
+        setSectorData(response.data);
+
+        const agriculture = response.data.agriculture ?? {};
+        const marine = response.data.marine ?? {};
+
+        const botMessage: ChatMessage = {
+          id: `${Date.now()}-bot`,
+          role: "bot",
+          content:
+            `📍 **Field Location Coordinates: ${latitude.toFixed(2)}°N, ${longitude.toFixed(2)}°E**\n\n` +
+            `Hyper-local advisories retrieved for Agriculture, Smart City, and Severe Weather.\n\n` +
+            `• Sowing Advisory: ${agriculture.sowingAdvisory ?? "Normal"}\n` +
+            `• Irrigation: ${agriculture.irrigationRecommendation ?? "Adequate"}` +
+            `• Marine/Fisheries: ${marine.fishermenAction ?? "Safe"}`,
+          timestamp: new Date(),
+        };
+
+        setMessages((previous) => [...previous, botMessage]);
+      }
+    } catch (error) {
+      console.error("GPS advisory request failed:", error);
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          id: `${Date.now()}-error`,
+          role: "bot",
+          content:
+            "⚠️ Unable to retrieve hyper-local weather advisories.",
+          timestamp: new Date(),
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [fetchJson]);
+
   const handleUseMyLocation = useCallback(async () => {
     if (!navigator.geolocation) {
       window.alert("Geolocation is not supported by your browser.");
@@ -358,65 +416,6 @@ export default function MobileWeatherGPT() {
       setGpsCoords(null);
       return;
     }
-
-    /*
-     * One shot — fetch advisories once we have the first
-     * precise fix from the watch below.
-     */
-    const loadAdvisoriesForLocation = useCallback(async (latitude: number, longitude: number) => {
-      setIsLoading(true);
-
-      const userMessage: ChatMessage = {
-        id: Date.now().toString(),
-        role: "user",
-        content: `📍 My GPS location: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
-        timestamp: new Date(),
-      };
-
-      setMessages((previous) => [...previous, userMessage]);
-
-      try {
-        const response = await fetchJson<any>(
-          `${API_BASE_URL}/api/weather/advisories?latitude=${latitude}&longitude=${longitude}&sector=all`
-        );
-
-        if (response.success && response.data) {
-          setSectorData(response.data);
-
-          const agriculture = response.data.agriculture ?? {};
-          const marine = response.data.marine ?? {};
-
-          const botMessage: ChatMessage = {
-            id: `${Date.now()}-bot`,
-            role: "bot",
-            content:
-              `📍 **Field Location Coordinates: ${latitude.toFixed(2)}°N, ${longitude.toFixed(2)}°E**\n\n` +
-              `Hyper-local advisories retrieved for Agriculture, Smart City, and Severe Weather.\n\n` +
-              `• Sowing Advisory: ${agriculture.sowingAdvisory ?? "Normal"}\n` +
-              `• Irrigation: ${agriculture.irrigationRecommendation ?? "Adequate"}` +
-              `• Marine/Fisheries: ${marine.fishermenAction ?? "Safe"}`,
-            timestamp: new Date(),
-          };
-
-          setMessages((previous) => [...previous, botMessage]);
-        }
-      } catch (error) {
-        console.error("GPS advisory request failed:", error);
-
-        setMessages((previous) => [
-          ...previous,
-          {
-            id: `${Date.now()}-error`,
-            role: "bot",
-            content:
-              "⚠️ Unable to retrieve hyper-local weather advisories.",
-            timestamp: new Date(),
-          },
-        ]);
-      } finally {
-        setIsLoading(false);
-      }
-    }, [fetchJson]);
 
     const watchOptions: PositionOptions = {
       enableHighAccuracy: true, // request GPS / precise fix
@@ -458,7 +457,7 @@ export default function MobileWeatherGPT() {
 
     setGpsWatchId(watchId);
     setGpsWatching(true);
-  }, [gpsWatchId ]);
+  }, [gpsWatchId, loadAdvisoriesForLocation]);
 
   /*
    * Tear down the GPS watch whenever the component unmounts

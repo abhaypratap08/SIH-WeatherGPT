@@ -2483,3 +2483,9 @@ html, body {
   .input-container { transition: none !important; }
   .quick-btn { transition: none !important; }
 }
+
+/* ── Shimmer animation for AI chat loading skeleton ── */
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
