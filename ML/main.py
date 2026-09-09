@@ -1,7 +1,9 @@
 import json
 import os
+import urllib.parse
+import urllib.request
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,8 +49,15 @@ agent = build_agent(
 # REQUEST / RESPONSE MODELS
 # =========================================================
 
+class LocationPayload(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy: Optional[float] = None
+
+
 class AgentRequest(BaseModel):
     prompt: str
+    location: Optional[LocationPayload] = None
 
 
 class AgentResponse(BaseModel):
@@ -73,6 +82,81 @@ class RouteWeatherResponse(BaseModel):
 # =========================================================
 # HELPER FUNCTIONS
 # =========================================================
+
+def reverse_geocode(latitude: float, longitude: float) -> Optional[str]:
+    """
+    Turn coordinates into a human-readable place name using OpenStreetMap's
+    free Nominatim reverse-geocoding endpoint. Returns None on any failure
+    so the caller can fall back to raw coordinates instead of erroring out.
+    """
+    try:
+        params = urllib.parse.urlencode(
+            {
+                "lat": latitude,
+                "lon": longitude,
+                "format": "jsonv2",
+                "zoom": 10,
+                "addressdetails": 1,
+            }
+        )
+        url = f"https://nominatim.openstreetmap.org/reverse?{params}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                # Nominatim requires an identifying User-Agent for API use.
+                "User-Agent": "WeatherGPT/1.0 (weather assistant app)"
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            data = json.loads(res.read().decode("utf-8"))
+
+        address = data.get("address", {})
+        city = (
+            address.get("city")
+            or address.get("town")
+            or address.get("village")
+            or address.get("county")
+        )
+        state = address.get("state")
+        country = address.get("country")
+
+        parts = [part for part in (city, state, country) if part]
+        if parts:
+            return ", ".join(parts)
+
+        return data.get("display_name")
+    except Exception:
+        return None
+
+
+def build_location_context(location: Optional[LocationPayload]) -> Optional[dict[str, str]]:
+    """
+    Turn a LocationPayload into a system message that tells the agent the
+    user's current place, so it can answer "my location" style queries
+    without asking the user to type a city.
+    """
+    if location is None:
+        return None
+
+    place_name = reverse_geocode(location.latitude, location.longitude)
+
+    if place_name:
+        location_desc = (
+            f"{place_name} (approximately {location.latitude:.4f}, {location.longitude:.4f})"
+        )
+    else:
+        location_desc = f"coordinates {location.latitude:.4f}, {location.longitude:.4f}"
+
+    return {
+        "role": "system",
+        "content": (
+            f"The user's current device location is: {location_desc}. "
+            "If the user asks about 'my location', 'here', 'current location', "
+            "or otherwise doesn't name a place, use this location directly instead "
+            "of asking them to provide one."
+        ),
+    }
+
 
 def generate_index_html(map_data: dict[str, Any]) -> str:
     """
@@ -165,16 +249,20 @@ def root():
 
 @app.post("/agent", response_model=AgentResponse)
 def weather_agent(request: AgentRequest):
-    result = agent.invoke(
+    messages: list[dict[str, str]] = []
+
+    location_context = build_location_context(request.location)
+    if location_context:
+        messages.append(location_context)
+
+    messages.append(
         {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": request.prompt,
-                }
-            ]
+            "role": "user",
+            "content": request.prompt,
         }
     )
+
+    result = agent.invoke({"messages": messages})
 
     response = result["messages"][-1].content
 
