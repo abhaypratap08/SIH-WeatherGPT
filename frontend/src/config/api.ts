@@ -1,61 +1,99 @@
 /**
  * API Configuration
  *
- * Java backend  (Spring Boot) → :8080  — weather, climate, alerts, NWP, sectors
- * Python ML backend (FastAPI) → :8000  — AI agent chat, route-weather
+ * Java backend (Spring Boot) → Railway
+ * Python ML backend (FastAPI) → Railway
  *
- * In dev the Vite proxy rewrites /api → :8080 and /agent|/route-weather → :8000
- * so all requests go through the same origin (no CORS issues).
+ * In production, requests go directly to the Railway backends.
+ * In development, these URLs also work directly, so no Vite proxy
+ * is required for these API calls.
  */
 
-export const JAVA_API_BASE   = "https://sih-weathergpt-production.up.railway.app";   // proxied: /api → localhost:8080
-export const ML_API_BASE     = "https://bubbly-abundance-production-4c2a.up.railway.app";   // proxied: /agent, /route-weather → localhost:8000
-// export const JAVA_API_BASE   = "";   // proxied: /api → localhost:8080
-// export const ML_API_BASE     = "";   // proxied: /agent, /route-weather → localhost:8000
+// ── Backend base URLs ────────────────────────────────────────────────
 
-/** @deprecated Use WEATHER_ENDPOINTS / ALERTS_ENDPOINT etc. directly.
- *  Kept for MobileWeatherGPT backward compatibility. */
+export const JAVA_API_BASE =
+  "https://sih-weathergpt-production.up.railway.app";
+
+export const ML_API_BASE =
+  "https://bubbly-abundance-production-4c2a.up.railway.app";
+
+// Kept for MobileWeatherGPT backward compatibility.
 export const API_BASE_URL = "";
 
 // ── Java backend endpoints ──────────────────────────────────────────
+
 export const WEATHER_ENDPOINTS = {
-  CURRENT:  (location: string) =>
-    `/api/weather/current?location=${encodeURIComponent(location)}`,
+  CURRENT: (location: string) =>
+    `${JAVA_API_BASE}/api/weather/current?location=${encodeURIComponent(location)}`,
+
   FORECAST: (location: string, days = 7) =>
-    `/api/weather/forecast?location=${encodeURIComponent(location)}&days=${days}`,
-  NWP:      (location: string) =>
-    `/api/weather/nwp?location=${encodeURIComponent(location)}`,
+    `${JAVA_API_BASE}/api/weather/forecast?location=${encodeURIComponent(location)}&days=${days}`,
+
+  NWP: (location: string) =>
+    `${JAVA_API_BASE}/api/weather/nwp?location=${encodeURIComponent(location)}`,
 };
 
-export const ADVISORIES_ENDPOINT = (location: string, sector: string) =>
-  `/api/weather/advisories?location=${encodeURIComponent(location)}&sector=${encodeURIComponent(sector)}`;
+export const ADVISORIES_ENDPOINT = (
+  location: string,
+  sector: string,
+) =>
+  `${JAVA_API_BASE}/api/weather/advisories?location=${encodeURIComponent(
+    location,
+  )}&sector=${encodeURIComponent(sector)}`;
 
 export const ALERTS_ENDPOINT = (location: string) =>
-  `/api/alerts/early-warnings?location=${encodeURIComponent(location)}`;
+  `${JAVA_API_BASE}/api/alerts/early-warnings?location=${encodeURIComponent(
+    location,
+  )}`;
 
 export const CLIMATE_ENDPOINT = (
   location: string,
   startYear = 2015,
-  endYear   = 2024,
+  endYear = 2024,
 ) =>
-  `/api/weather/climate?location=${encodeURIComponent(location)}&startYear=${startYear}&endYear=${endYear}`;
+  `${JAVA_API_BASE}/api/weather/climate?location=${encodeURIComponent(
+    location,
+  )}&startYear=${startYear}&endYear=${endYear}`;
 
-export const CHAT_ENDPOINT = `/api/chat/query`;
+export const CHAT_ENDPOINT =
+  `${JAVA_API_BASE}/api/chat/query`;
 
-// ── Python ML backend endpoints ──────────────────────────────────────
-/** AI agent chat (LangChain + Ollama) */
-export const ML_AGENT_ENDPOINT      = `/agent`;
-/** Route weather analysis */
-export const ML_ROUTE_ENDPOINT      = `/route-weather`;
+// ── Python ML backend endpoints ─────────────────────────────────────
 
-// ── In-flight deduplication helper ───────────────────────────────────
+/**
+ * AI agent chat
+ * LangChain + Ollama + FastAPI
+ */
+export const ML_AGENT_ENDPOINT =
+  `${ML_API_BASE}/agent`;
+
+/**
+ * Route weather analysis
+ */
+export const ML_ROUTE_ENDPOINT =
+  `${ML_API_BASE}/route-weather`;
+
+// ── In-flight deduplication helper ──────────────────────────────────
+
 const _inFlight = new Map<string, Promise<Response>>();
 
-export function fetchWithDedup(url: string, options?: RequestInit): Promise<Response> {
+export function fetchWithDedup(
+  url: string,
+  options?: RequestInit,
+): Promise<Response> {
   const key = `${options?.method ?? "GET"}:${url}`;
+
   const existing = _inFlight.get(key);
-  if (existing) return existing;
-  const p = fetch(url, options).finally(() => _inFlight.delete(key));
+
+  if (existing) {
+    return existing;
+  }
+
+  const p = fetch(url, options).finally(() => {
+    _inFlight.delete(key);
+  });
+
   _inFlight.set(key, p);
+
   return p;
 }
