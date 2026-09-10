@@ -96,19 +96,7 @@ const IconRain = () => (
   </svg>
 );
 
-const IconCalendar = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="3.5" y="5" width="17" height="16" rx="2" />
-    <path d="M3.5 10h17M8 3v4M16 3v4" />
-  </svg>
-);
 
-const IconLeaf = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M11 20A7 7 0 0 1 4 13c0-5 4.5-9 12-10 1 6-1 15-5 17z" />
-    <path d="M4 13c3-1 6-3 8-6" />
-  </svg>
-);
 
 const IconSend = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -139,6 +127,7 @@ const NAV_ITEMS = [
   { id: "chat", label: "Assistant chat", icon: <IconChat /> },
   { id: "route", label: "Route weather", icon: <IconRoute />, badge: "New" },
   { id: "report", label: "Weather report", icon: <IconChart /> },
+  { id: "map", label: "Weather map", icon: <IconPin /> },
   { id: "radar", label: "Interactive radar", icon: <IconRadar /> },
   { id: "settings", label: "Settings", icon: <IconSettings /> },
 ];
@@ -747,6 +736,261 @@ const reportStyles: { [key: string]: React.CSSProperties } = {
 };
 
 /* ----------------------------------------------------
+   SUB-COMPONENT: Weather Map (OpenStreetMap via Leaflet)
+---------------------------------------------------- */
+function WeatherMapView({ location }: { location: Coordinates | null }) {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
+  const [mapLayer, setMapLayer] = useState<'standard' | 'temperature' | 'precipitation' | 'wind'>('standard');
+
+  const defaultLat = location?.latitude ?? 20.5937;
+  const defaultLng = location?.longitude ?? 78.9629;
+
+  useEffect(() => {
+    if (!mapContainerRef.current || mapInstanceRef.current) return;
+
+    import('leaflet').then((L) => {
+      // Fix Leaflet default icon path issue in Vite
+      delete (L.Icon.Default.prototype as any)._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+      });
+
+      const map = L.map(mapContainerRef.current!, {
+        center: [defaultLat, defaultLng],
+        zoom: 5,
+        zoomControl: true,
+      });
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 18,
+      }).addTo(map);
+
+      // Add OpenWeatherMap weather layer (free tier)
+      // Temperature layer via Open-Meteo tile proxy
+      const rainLayer = L.tileLayer(
+        'https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=demo',
+        { opacity: 0.5, attribution: 'Weather &copy; OpenWeatherMap' }
+      );
+
+      (map as any)._weatherLayer = rainLayer;
+      mapInstanceRef.current = map;
+
+      if (location) {
+        markerRef.current = L.marker([location.latitude, location.longitude])
+          .addTo(map)
+          .bindPopup(`📍 Your Location<br>Lat: ${location.latitude.toFixed(4)}, Lng: ${location.longitude.toFixed(4)}`)
+          .openPopup();
+      }
+    });
+
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  // Update marker when location changes
+  useEffect(() => {
+    if (!mapInstanceRef.current || !location) return;
+    import('leaflet').then((L) => {
+      if (markerRef.current) {
+        markerRef.current.setLatLng([location.latitude, location.longitude]);
+      } else {
+        markerRef.current = L.marker([location.latitude, location.longitude])
+          .addTo(mapInstanceRef.current)
+          .bindPopup(`📍 Your Location`)
+          .openPopup();
+      }
+      mapInstanceRef.current.setView([location.latitude, location.longitude], 8);
+    });
+  }, [location]);
+
+  const switchLayer = (type: 'standard' | 'temperature' | 'precipitation' | 'wind') => {
+    setMapLayer(type);
+    if (!mapInstanceRef.current) return;
+    import('leaflet').then((L) => {
+      const map = mapInstanceRef.current;
+      // Remove all tile layers
+      map.eachLayer((layer: any) => {
+        if (layer instanceof L.TileLayer) map.removeLayer(layer);
+      });
+      // Re-add base OSM layer
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 18,
+      }).addTo(map);
+      // Overlay weather layer from Open-Meteo tile service
+      const overlays: Record<string, string> = {
+        temperature: 'https://tile.openweathermap.org/map/temp_new/{z}/{x}/{y}.png?appid=demo',
+        precipitation: 'https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=demo',
+        wind: 'https://tile.openweathermap.org/map/wind_new/{z}/{x}/{y}.png?appid=demo',
+      };
+      if (type !== 'standard' && overlays[type]) {
+        L.tileLayer(overlays[type], { opacity: 0.55, attribution: 'Weather &copy; OpenWeatherMap' }).addTo(map);
+      }
+    });
+  };
+
+  const layerButtons: { id: 'standard' | 'temperature' | 'precipitation' | 'wind'; label: string; emoji: string }[] = [
+    { id: 'standard', label: 'Standard', emoji: '🗺️' },
+    { id: 'temperature', label: 'Temperature', emoji: '🌡️' },
+    { id: 'precipitation', label: 'Rain', emoji: '🌧️' },
+    { id: 'wind', label: 'Wind', emoji: '💨' },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', background: 'var(--bg-deep)' }}>
+      {/* Toolbar */}
+      <div style={{
+        padding: '10px 16px',
+        background: 'var(--bg-panel)',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex',
+        gap: '8px',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: '12px', color: 'var(--text-secondary)', marginRight: '4px', fontWeight: 600 }}>Layer:</span>
+        {layerButtons.map((btn) => (
+          <button
+            key={btn.id}
+            onClick={() => switchLayer(btn.id)}
+            style={{
+              padding: '5px 12px',
+              borderRadius: '20px',
+              border: '1px solid',
+              borderColor: mapLayer === btn.id ? 'var(--accent-amber)' : 'var(--border-strong)',
+              background: mapLayer === btn.id ? 'rgba(240,168,60,0.12)' : 'transparent',
+              color: mapLayer === btn.id ? 'var(--accent-amber)' : 'var(--text-secondary)',
+              fontSize: '12px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            {btn.emoji} {btn.label}
+          </button>
+        ))}
+        {location && (
+          <span style={{ marginLeft: 'auto', fontSize: '11px', color: 'var(--text-muted)' }}>
+            📍 {location.latitude.toFixed(4)}, {location.longitude.toFixed(4)}
+          </span>
+        )}
+      </div>
+      {/* Map */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+        <link
+          rel="stylesheet"
+          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        />
+        <div
+          ref={mapContainerRef}
+          style={{ width: '100%', height: '100%', background: '#1a1a2e' }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------
+   SUB-COMPONENT: Interactive Radar (OpenStreetMap + weather overlay)
+---------------------------------------------------- */
+function InteractiveRadarView({ location }: { location: Coordinates | null }) {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!mapContainerRef.current || mapInstanceRef.current) return;
+
+    import('leaflet').then((L) => {
+      delete (L.Icon.Default.prototype as any)._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+      });
+
+      const centerLat = location?.latitude ?? 20.5937;
+      const centerLng = location?.longitude ?? 78.9629;
+
+      const map = L.map(mapContainerRef.current!, {
+        center: [centerLat, centerLng],
+        zoom: 5,
+        zoomControl: true,
+      });
+
+      // Dark base map for radar feel
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/">CARTO</a>',
+        maxZoom: 18,
+      }).addTo(map);
+
+      // Rain/precipitation overlay
+      L.tileLayer(
+        'https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=demo',
+        { opacity: 0.65, attribution: 'Weather &copy; OpenWeatherMap' }
+      ).addTo(map);
+
+      // Clouds overlay
+      L.tileLayer(
+        'https://tile.openweathermap.org/map/clouds_new/{z}/{x}/{y}.png?appid=demo',
+        { opacity: 0.4, attribution: 'Clouds &copy; OpenWeatherMap' }
+      ).addTo(map);
+
+      if (location) {
+        const pulseIcon = L.divIcon({
+          className: '',
+          html: `<div style="width:14px;height:14px;background:rgba(240,168,60,0.9);border-radius:50%;border:2px solid white;box-shadow:0 0 0 4px rgba(240,168,60,0.3);animation:pulse 1.5s infinite"></div>`,
+          iconSize: [14, 14],
+          iconAnchor: [7, 7],
+        });
+        L.marker([location.latitude, location.longitude], { icon: pulseIcon })
+          .addTo(map)
+          .bindPopup('📍 Your Location');
+      }
+
+      mapInstanceRef.current = map;
+    });
+
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', background: 'var(--bg-deep)' }}>
+      <div style={{
+        padding: '10px 16px',
+        background: 'var(--bg-panel)',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex',
+        gap: '12px',
+        alignItems: 'center',
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)' }}>📡 Live Precipitation & Cloud Radar</span>
+        <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: 'auto' }}>Powered by OpenStreetMap + OpenWeatherMap tiles</span>
+      </div>
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <div ref={mapContainerRef} style={{ width: '100%', height: '100%', background: '#0a0e15' }} />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------
    MAIN APP COMPONENT
 ---------------------------------------------------- */
 interface Coordinates {
@@ -1026,7 +1270,11 @@ export default function ChatScreen() {
 
           {activeNav === "report" && <WeatherReportView location={location} />}
 
-          {activeNav !== "chat" && activeNav !== "route" && activeNav !== "report" && (
+          {activeNav === "map" && <WeatherMapView location={location} />}
+
+          {activeNav === "radar" && <InteractiveRadarView location={location} />}
+
+          {activeNav !== "chat" && activeNav !== "route" && activeNav !== "report" && activeNav !== "map" && activeNav !== "radar" && (
             <div className="route-placeholder-screen">
               <div className="placeholder-card">
                 <span className="placeholder-icon">{NAV_ITEMS.find((item) => item.id === activeNav)?.icon}</span>

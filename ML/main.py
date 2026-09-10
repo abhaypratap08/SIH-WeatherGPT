@@ -5,12 +5,13 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agent import build_agent
 from route_weather.analyzer import analyze_route
+from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
 from route_weather.geocoding import get_coordinates
 from route_weather.route_api import get_route
 from route_weather.route_processor import add_arrival_times, sample_route
@@ -23,7 +24,7 @@ from route_weather.weather_api import get_weather_for_route
 app = FastAPI(
     title="WeatherGPT API",
     description="Unified API for Crop/Weather Agent and Route Weather Analysis.",
-    version="1.0.0",
+    version="1.0.1",
 )
 
 app.add_middleware(
@@ -39,10 +40,17 @@ app.add_middleware(
 # INITIALIZATION (OLLAMA / LANGCHAIN AGENT)
 # =========================================================
 
-agent = build_agent(
-    model_name="gemma4",
-    base_url="http://localhost:11434",
-)
+# Model is configurable via OLLAMA_MODEL env var (default: llama3.2).
+# Lazy-initialise so the server starts even if Ollama isn't running yet —
+# it will fail gracefully at request time, not at startup.
+_agent_instance = None
+
+
+def get_agent():
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = build_agent()  # reads OLLAMA_MODEL / OLLAMA_BASE_URL env vars
+    return _agent_instance
 
 
 # =========================================================
@@ -262,7 +270,7 @@ def weather_agent(request: AgentRequest):
         }
     )
 
-    result = agent.invoke({"messages": messages})
+    result = get_agent().invoke({"messages": messages})
 
     response = result["messages"][-1].content
 
@@ -273,29 +281,32 @@ def weather_agent(request: AgentRequest):
 
 @app.post("/route-weather", response_model=RouteWeatherResponse)
 def route_weather(request: RouteWeatherRequest):
-    # 1. Geocode locations
-    origin = get_coordinates(request.origin)
-    destination = get_coordinates(request.destination)
-
-    if not origin:
-        return {
-            "message": "Could not find origin",
-            "route_info": {},
-            "risk_summary": {},
-            "weather_data": [],
-            "map_json": {},
-            "index_html": "",
-        }
-
-    if not destination:
-        return {
-            "message": "Could not find destination",
-            "route_info": {},
-            "risk_summary": {},
-            "weather_data": [],
-            "map_json": {},
-            "index_html": "",
-        }
+    # 1. Geocode locations with proper error handling
+    try:
+        origin = get_coordinates(request.origin)
+    except LocationNotFoundError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except GeocodingServiceError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e)
+        )
+    
+    try:
+        destination = get_coordinates(request.destination)
+    except LocationNotFoundError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except GeocodingServiceError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e)
+        )
 
     # 2. Parse departure time
     today = datetime.now().strftime("%Y-%m-%d")

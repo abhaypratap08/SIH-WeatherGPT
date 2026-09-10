@@ -95,37 +95,47 @@ export default function ChatDrawer({
       setIsLoading(true);
 
       try {
-        // Simulated API call — replace with actual backend call
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const res = await fetch('/api/chat/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text.trim(),
+            language: selectedLang,
+            sector: 'general',
+            sessionId: 'desktop-drawer-session',
+          }),
+        });
 
-        const botResponse: ChatMessage = {
-          id: `bot-${Date.now()}`,
-          role: 'bot',
-          content: `Here's the weather information for your query: "${text}".\n\nCurrent conditions show partly cloudy skies with a temperature of 28°C. Humidity is at 72% with winds at 12 km/h. There's a 10% chance of precipitation.`,
-          timestamp: new Date(),
-          structuredData: {
-            location: 'Delhi',
-            date: 'Tomorrow, 10 Sep',
-            temp: '32° / 26°',
-            condition: 'Moderate to heavy rain (80% chance)',
-            metrics: {
-              humidity: '88%',
-              wind: '18 km/h',
-              precipitation: '80%',
-            },
-            description:
-              'Expect cloudy skies with intermittent rain throughout the day. It may be windy in the evening.',
-          },
-        };
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        const d = await res.json();
 
-        setMessages((prev) => [...prev, botResponse]);
+        if (d.success && d.data) {
+          const botResponse: ChatMessage = {
+            id: `bot-${Date.now()}`,
+            role: 'bot',
+            content: d.data.answer || 'Query processed.',
+            voiceText: d.data.voiceAnswer || d.data.answer,
+            structuredData: d.data,
+            timestamp: new Date(),
+          };
+          setMessages((prev) => [...prev, botResponse]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { id: `bot-${Date.now()}`, role: 'bot', content: d.message || 'Could not process query.', timestamp: new Date() },
+          ]);
+        }
       } catch (error) {
         console.error('Error sending message:', error);
+        setMessages((prev) => [
+          ...prev,
+          { id: `bot-${Date.now()}`, role: 'bot', content: '⚠️ Unable to reach backend. Is the Java server running on :8080?', timestamp: new Date() },
+        ]);
       } finally {
         setIsLoading(false);
       }
     },
-    []
+    [selectedLang]
   );
 
   const handleSpeakMessage = useCallback(

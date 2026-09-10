@@ -13,34 +13,6 @@ It runs 100% locally using Ollama as the LLM backend (no OpenAI/Anthropic
 API keys needed) and uses the free, no-API-key Open-Meteo APIs for:
   1. Geocoding a place name -> latitude/longitude
   2. Fetching current weather + today's forecast for those coordinates
-
------------------------------------------------------------------------
-SETUP
------------------------------------------------------------------------
-1. Install Ollama:            https://ollama.com/download
-2. Pull a model:              ollama pull gemma3
-   (see the NOTE below about "gemma4")
-3. Make sure Ollama is running (it runs a local server on :11434 once
-   installed / after `ollama serve`).
-4. pip install -r requirements.txt
-5. python weather_agent.py "will it rain in mumbai tomorrow?"
-   or just run `python weather_agent.py` for an interactive prompt loop.
-
------------------------------------------------------------------------
-NOTE ON THE MODEL NAME
------------------------------------------------------------------------
-You asked for "gemma4" — as of this writing there is no model called
-"gemma4" published on Ollama's library (the current Gemma line on Ollama
-is gemma3, e.g. `gemma3`, `gemma3:12b`, etc.). This script does NOT
-hardcode that assumption though: the model name is fully configurable
-via the `--model` CLI flag or the OLLAMA_MODEL env var, so the moment
-"gemma4" (or any other tag) exists and you've pulled it with
-`ollama pull gemma4`, you can point this script at it with zero code
-changes:
-
-    python weather_agent.py --model gemma4 "is it hot in new york"
-
-Default model is "gemma3" if nothing else is specified.
 """
 
 import argparse
@@ -187,7 +159,7 @@ TOOLS = [geocode_place, get_weather]
 # Agent construction
 # ---------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a helpful weather assistant.
+SYSTEM_PROMPT = """You are WeatherGPT, a helpful AI weather assistant aligned with IMD (India Meteorological Department) standards.
 
 For ANY question about weather, temperature, rain, heat, cold, wind, etc.
 in a place, you MUST use your tools to get real data — never guess or use
@@ -202,24 +174,27 @@ Workflow:
    language (e.g. "Yes, it's likely to rain in Mumbai today — about a
    70% chance, with 12mm expected."). Include the temperature in
    Celsius. Don't dump raw JSON at the user.
+4. If relevant, add a brief actionable advisory (e.g. carry an umbrella,
+   avoid outdoor work during peak heat, etc.).
 
 If the place cannot be found, say so clearly instead of guessing.
 """
 
 
-def build_agent(model_name: str, base_url: str = None):
-    """Build a LangChain 1.0+ agent (langchain.agents.create_agent) backed by
-    a local Ollama chat model.
+def build_agent(model_name: str = None, base_url: str = None):
+    """Build a LangChain 1.0+ agent backed by a local Ollama chat model.
 
-    Note: older LangChain tutorials use `AgentExecutor` /
-    `create_tool_calling_agent` — those were removed from `langchain.agents`
-    in LangChain 1.0 in favor of the unified `create_agent` (built on
-    LangGraph). If you have langchain < 1.0 installed instead, either
-    `pip install -U langchain` or swap this function back to the old API.
+    Model priority:
+      1. model_name argument (if provided and not None)
+      2. OLLAMA_MODEL environment variable
+      3. Default: llama3.2
     """
+    resolved_model = model_name or os.environ.get("OLLAMA_MODEL", "llama3.2")
+    resolved_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
     llm = ChatOllama(
-        model=model_name,
-        base_url=base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+        model=resolved_model,
+        base_url=resolved_url,
         temperature=0,
     )
 
@@ -239,9 +214,8 @@ def main():
     parser.add_argument("query", nargs="*", help="Weather question, e.g. 'is it hot in new york'")
     parser.add_argument(
         "--model",
-        default=os.environ.get("OLLAMA_MODEL", "gemma4"),
-        help="Ollama model tag to use (default: gemma3, or $OLLAMA_MODEL). "
-             "Set to 'gemma4' once/if that tag exists and is pulled locally.",
+        default=os.environ.get("OLLAMA_MODEL", "llama3.2"),
+        help="Ollama model tag to use (default: llama3.2, or $OLLAMA_MODEL).",
     )
     parser.add_argument(
         "--base-url",

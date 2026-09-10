@@ -1,65 +1,61 @@
 /**
  * API Configuration
  *
- * Development:
- *   - Uses VITE_API_BASE_URL when provided
- *   - Otherwise uses the current hostname on port 8080
+ * Java backend  (Spring Boot) → :8080  — weather, climate, alerts, NWP, sectors
+ * Python ML backend (FastAPI) → :8000  — AI agent chat, route-weather
  *
- * Production:
- *   - Uses relative /api paths so Vercel can proxy them to Railway
+ * In dev the Vite proxy rewrites /api → :8080 and /agent|/route-weather → :8000
+ * so all requests go through the same origin (no CORS issues).
  */
 
+// export const JAVA_API_BASE   = "https://sih-weathergpt-production.up.railway.app";   // proxied: /api → localhost:8080
+// export const ML_API_BASE     = "https://bubbly-abundance-production-4c2a.up.railway.app";   // proxied: /agent, /route-weather → localhost:8000
+export const JAVA_API_BASE   = "";   // proxied: /api → localhost:8080
+export const ML_API_BASE     = "";   // proxied: /agent, /route-weather → localhost:8000
 
-export const API_BASE_URL = "https://sih-weathergpt-production.up.railway.app";
+/** @deprecated Use WEATHER_ENDPOINTS / ALERTS_ENDPOINT etc. directly.
+ *  Kept for MobileWeatherGPT backward compatibility. */
+export const API_BASE_URL = "";
 
-// In-flight request deduplication cache: key → promise
-const inFlightRequests = new Map<string, Promise<Response>>();
-
-export async function fetchWithDedup(
-  url: string,
-  options?: RequestInit
-): Promise<Response> {
-  const key = `${options?.method || 'GET'}:${url}`;
-
-  const existing = inFlightRequests.get(key);
-  if (existing) {
-    return existing;
-  }
-
-  const promise = fetch(url, options).finally(() => {
-    inFlightRequests.delete(key);
-  });
-
-  inFlightRequests.set(key, promise);
-  return promise;
-}
-
-// API endpoints
+// ── Java backend endpoints ──────────────────────────────────────────
 export const WEATHER_ENDPOINTS = {
-  CURRENT: (location: string) =>
-    `${API_BASE_URL}/api/weather/current?location=${encodeURIComponent(location)}`,
-
-  FORECAST: (location: string, days: number = 7) =>
-    `${API_BASE_URL}/api/weather/forecast?location=${encodeURIComponent(location)}&days=${days}`,
-
-  NWP: (location: string) =>
-    `${API_BASE_URL}/api/weather/nwp?location=${encodeURIComponent(location)}`,
+  CURRENT:  (location: string) =>
+    `/api/weather/current?location=${encodeURIComponent(location)}`,
+  FORECAST: (location: string, days = 7) =>
+    `/api/weather/forecast?location=${encodeURIComponent(location)}&days=${days}`,
+  NWP:      (location: string) =>
+    `/api/weather/nwp?location=${encodeURIComponent(location)}`,
 };
 
-export const ADVISORIES_ENDPOINT = (
-  location: string,
-  sector: string
-) =>
-  `${API_BASE_URL}/api/weather/advisories?location=${encodeURIComponent(location)}&sector=${encodeURIComponent(sector)}`;
+export const ADVISORIES_ENDPOINT = (location: string, sector: string) =>
+  `/api/weather/advisories?location=${encodeURIComponent(location)}&sector=${encodeURIComponent(sector)}`;
 
 export const ALERTS_ENDPOINT = (location: string) =>
-  `${API_BASE_URL}/api/alerts/early-warnings?location=${encodeURIComponent(location)}`;
+  `/api/alerts/early-warnings?location=${encodeURIComponent(location)}`;
 
 export const CLIMATE_ENDPOINT = (
   location: string,
-  startYear: number = 2015,
-  endYear: number = 2024
+  startYear = 2015,
+  endYear   = 2024,
 ) =>
-  `${API_BASE_URL}/api/weather/climate?location=${encodeURIComponent(location)}&startYear=${startYear}&endYear=${endYear}`;
+  `/api/weather/climate?location=${encodeURIComponent(location)}&startYear=${startYear}&endYear=${endYear}`;
 
-export const CHAT_ENDPOINT = `${API_BASE_URL}/api/chat/query`;
+export const CHAT_ENDPOINT = `/api/chat/query`;
+
+// ── Python ML backend endpoints ──────────────────────────────────────
+/** AI agent chat (LangChain + Ollama) */
+export const ML_AGENT_ENDPOINT      = `/agent`;
+/** Route weather analysis */
+export const ML_ROUTE_ENDPOINT      = `/route-weather`;
+
+// ── In-flight deduplication helper ───────────────────────────────────
+const _inFlight = new Map<string, Promise<Response>>();
+
+export function fetchWithDedup(url: string, options?: RequestInit): Promise<Response> {
+  const key = `${options?.method ?? "GET"}:${url}`;
+  const existing = _inFlight.get(key);
+  if (existing) return existing;
+  const p = fetch(url, options).finally(() => _inFlight.delete(key));
+  _inFlight.set(key, p);
+  return p;
+}
