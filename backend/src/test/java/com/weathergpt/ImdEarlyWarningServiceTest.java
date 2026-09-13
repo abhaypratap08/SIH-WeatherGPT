@@ -23,6 +23,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 
 @ExtendWith(MockitoExtension.class)
@@ -52,7 +53,7 @@ class ImdEarlyWarningServiceTest {
     void heavyRainfall_generatesOrangeAlert() {
         given(weatherService.getCurrentWeather(MUMBAI)).willReturn(
                 CurrentWeatherResponse.builder().temperature(28.0).windSpeed(15.0).weatherCode(65).build());
-        given(weatherService.getForecast(MUMBAI, anyInt())).willReturn(
+        given(weatherService.getForecast(eq(MUMBAI), anyInt())).willReturn(
                 ForecastResponse.builder().days(List.of(
                         ForecastDay.builder().date("2026-09-08").precipitationSum(85.0).build()
                 )).build());
@@ -72,7 +73,7 @@ class ImdEarlyWarningServiceTest {
     void heatwave_generatesWarning() {
         given(weatherService.getCurrentWeather(MUMBAI)).willReturn(
                 CurrentWeatherResponse.builder().temperature(42.5).windSpeed(10.0).weatherCode(0).build());
-        given(weatherService.getForecast(MUMBAI, anyInt())).willReturn(
+        given(weatherService.getForecast(eq(MUMBAI), anyInt())).willReturn(
                 ForecastResponse.builder().days(List.of(
                         ForecastDay.builder().date("2026-09-08").precipitationSum(0.0).build()
                 )).build());
