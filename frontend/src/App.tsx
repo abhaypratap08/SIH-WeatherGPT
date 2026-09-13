@@ -775,7 +775,7 @@ function AIChatView({ location }: { location: Coordinates | null }) {
           </div>
         </div>
         <p style={{ fontSize:'10.5px', textAlign:'center', color:'var(--text-muted)', margin:'8px 0 0' }}>
-          Powered by Ollama + LangChain · answers are grounded in live weather data
+          Powered by OpenRouter + LangChain · answers are grounded in live weather data
         </p>
       </div>
     </div>
