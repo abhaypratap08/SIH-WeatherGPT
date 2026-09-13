@@ -22,3 +22,5 @@ ML/sample_resume-2.pdf
 backend/uploads/
 # Local test resumes
 ML/sample_resume-2.pdf
+.vercel
+.env*
