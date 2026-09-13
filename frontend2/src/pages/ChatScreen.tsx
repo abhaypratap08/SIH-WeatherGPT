@@ -37,7 +37,7 @@ interface RouteApiResponse {
   index_html?: string;
 }
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_BASE_URL;
 
 /* ----------------------------------------------------
    ICONS — a small consistent glyph set (no emoji)
