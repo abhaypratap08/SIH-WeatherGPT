@@ -24,6 +24,7 @@ import requests
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
+from langchain_openrouter import ChatOpenRouter
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -182,21 +183,22 @@ If the place cannot be found, say so clearly instead of guessing.
 
 
 def build_agent(model_name: str = None, base_url: str = None):
-    """Build a LangChain 1.0+ agent backed by a local Ollama chat model.
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
-    Model priority:
-      1. model_name argument (if provided and not None)
-      2. OLLAMA_MODEL environment variable
-      3. Default: llama3.2
-    """
-    resolved_model = model_name or os.environ.get("OLLAMA_MODEL", "llama3.2")
-    resolved_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    llm = ChatOllama(
-        model=resolved_model,
-        base_url=resolved_url,
-        temperature=0,
-    )
+    if provider == "openrouter":
+        llm = ChatOpenRouter(
+            model=model_name or os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+            temperature=0,
+            max_retries=2,
+        )
+    elif provider == "ollama":
+        llm = ChatOllama(
+            model=model_name or os.environ.get("OLLAMA_MODEL", "llama3.2"),
+            base_url=base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0,
+        )
+    else:
+        raise ValueError("LLM_PROVIDER must be 'openrouter' or 'ollama'")
 
     return create_agent(
         model=llm,

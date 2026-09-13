@@ -690,7 +690,7 @@ function AIChatView({ location }: { location: Coordinates | null }) {
       const d = await res.json();
       setMessages(p => [...p, { role:'assistant', content:d.message }]);
     } catch {
-      setMessages(p => [...p, { role:'assistant', content:"⚠️ Couldn't reach the AI backend. Make sure the Python ML server is running on :8000." }]);
+      setMessages(p => [...p, { role:'assistant', content:"⚠️ The AI service is temporarily unavailable. Please try again." }]);
     } finally { setLoading(false); }
   };
 
