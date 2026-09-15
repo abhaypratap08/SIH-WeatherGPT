@@ -10,7 +10,6 @@ import {
   Mic,
   Radar,
   Send,
-  Thermometer,
   TrendingUp,
   Volume2,
   VolumeX,
@@ -41,7 +40,7 @@ import { useVoiceOutput } from './hooks/useVoiceOutput';
 
 type MessageRole = 'user' | 'bot';
 type NavPage =
-  | 'weather' | 'forecast' | 'nwp' | 'sectors' | 'alerts' | 'climate'
+  | 'forecast' | 'nwp' | 'sectors' | 'alerts' | 'climate'
   | 'aichat' | 'route' | 'report' | 'map' | 'radar';
 
 interface AiMessage { role: 'user' | 'assistant'; content: string; }
@@ -790,7 +789,7 @@ export default function App() {
   // ── Java-backend chat / nav state ──
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
-  const [activeNav, setActiveNav] = useState<NavPage>('weather');
+  const [activeNav, setActiveNav] = useState<NavPage>('forecast');
   const [selectedLang, setSelectedLang] = useState('en');
   const [currentCity, setCurrentCity] = useState('Delhi');
   const [gpsCoords, setGpsCoords] = useState<Coordinates|null>(null);
@@ -806,7 +805,6 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [sectorLoading, setSectorLoading] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [currentWeather, setCurrentWeather] = useState<any>(null);
   const [forecastList, setForecastList] = useState<any[]>([]);
   const [nwpComparison, setNwpComparison] = useState<any>(null);
   const [sectorAdvisory, setSectorAdvisory] = useState<any>(null);
@@ -888,8 +886,6 @@ export default function App() {
 
   const fetchWeather = async (city: string, signal?: AbortSignal) => {
     try {
-      const r = await fetch(WEATHER_ENDPOINTS.CURRENT(city), {signal}); const d = await r.json();
-      if (d.success && d.data) setCurrentWeather(d.data);
       const f = await fetch(WEATHER_ENDPOINTS.FORECAST(city,7), {signal}); const fd = await f.json();
       if (fd.success && fd.data?.days) setForecastList(fd.data.days);
     } catch (e) { if (!(e instanceof Error && e.name==='AbortError')) console.warn('Weather error:', e); }
@@ -956,8 +952,7 @@ export default function App() {
 
   // ── Shared header nav items ──
   const ALL_NAV: {id:NavPage;label:string;icon:React.ReactNode;group:'java'|'ml'}[] = [
-    { id:'weather',  label:'Nowcasting',   icon:<Radar size={20}/>,       group:'java' },
-    { id:'forecast', label:'Forecast',     icon:<BarChart3 size={20}/>,   group:'java' },
+    { id:'forecast', label:'Forecast', icon:<BarChart3 size={20}/>, group:'java' },
     { id:'nwp',      label:'NWP Models',   icon:<Cpu size={20}/>,         group:'java' },
     { id:'sectors',  label:'Sectors',      icon:<Layers size={20}/>,      group:'java' },
     { id:'alerts',   label:'Alerts',       icon:<Bell size={20}/>,        group:'java' },
@@ -1076,34 +1071,6 @@ export default function App() {
         {!isFullscreen && (<>
           <div className="dashboard-view-container">
 
-            {/* Nowcast */}
-            {activeNav==='weather' && !currentWeather && (
-              <div style={{ textAlign:'center', padding:'40px', color:'#94a3b8' }}>
-                <div style={{ fontSize:'40px', marginBottom:'12px' }}>🌤️</div>
-                <p style={{ margin:'0 0 8px', fontWeight:600, color:'#cbd5e1' }}>Loading weather for {currentCity}…</p>
-                <p style={{ margin:0, fontSize:'12px' }}>Connecting to Open-Meteo service</p>
-              </div>
-            )}
-            {activeNav==='weather' && currentWeather && (
-              <div className="weather-card-simple">
-                <div className="weather-card-header">
-                  <MapPin size={16}/><span>{currentWeather.location?.name}, {currentWeather.location?.country}</span>
-                  <span style={{ marginLeft:'auto', fontSize:'11px', color:'#94a3b8' }}>Live Observation</span>
-                </div>
-                <div className="weather-card-main">
-                  <span className="weather-temp">{Math.round(currentWeather.temperature)}°C</span>
-                  <span className="weather-desc">{currentWeather.weatherDescription}</span>
-                </div>
-                <div className="weather-card-metrics">
-                  <div className="metric"><Thermometer size={14}/><span>Feels {Math.round(currentWeather.apparentTemperature||currentWeather.temperature)}°C</span></div>
-                  <div className="metric"><Droplets size={14}/><span>{currentWeather.humidity}% humidity</span></div>
-                  <div className="metric"><Wind size={14}/><span>{currentWeather.windSpeed} km/h wind</span></div>
-                  <div className="metric"><Cloud size={14}/><span>{currentWeather.pressure} hPa</span></div>
-                </div>
-              </div>
-            )}
-
-            {/* 7-day forecast */}
             {activeNav==='forecast' && (
               <div className="forecast-panel-desktop">
                 <h3 style={{ margin:'0 0 12px', fontSize:'16px' }}>📅 7-Day Forecast — {currentCity}</h3>

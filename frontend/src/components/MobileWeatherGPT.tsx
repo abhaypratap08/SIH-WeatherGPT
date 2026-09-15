@@ -26,7 +26,6 @@ interface ChatMessage {
 
 type ActiveTab =
   | "chat"
-  | "nowcast"
   | "nwp"
   | "sectors"
   | "alerts"
@@ -73,8 +72,6 @@ export default function MobileWeatherGPT() {
   const [isSpeakingId, setIsSpeakingId] = useState<string | null>(null);
 
   // Live data
-  const [nowcastData, setNowcastData] = useState<any>(null);
-  const [forecastDays, setForecastDays] = useState<any[]>([]);
   const [nwpData, setNwpData] = useState<any>(null);
   const [sectorData, setSectorData] = useState<any>(null);
   const [activeSector, setActiveSector] =
@@ -147,45 +144,6 @@ export default function MobileWeatherGPT() {
       return response.json();
     },
     []
-  );
-
-  /*
-   * Fetch current weather + forecast.
-   */
-  const fetchNowcast = useCallback(
-    async (city: string, signal?: AbortSignal) => {
-      try {
-        const encodedCity = encodeURIComponent(city);
-
-        const currentResponse = await fetchJson<any>(
-          `${API_BASE_URL}/api/weather/current?location=${encodedCity}`,
-          signal
-        );
-
-        if (currentResponse.success && currentResponse.data) {
-          setNowcastData(currentResponse.data);
-        }
-
-        const forecastResponse = await fetchJson<any>(
-          `${API_BASE_URL}/api/weather/forecast?location=${encodedCity}&days=7`,
-          signal
-        );
-
-        if (
-          forecastResponse.success &&
-          Array.isArray(forecastResponse.data?.days)
-        ) {
-          setForecastDays(forecastResponse.data.days);
-        }
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          return;
-        }
-
-        console.warn("Could not fetch nowcast:", error);
-      }
-    },
-    [fetchJson]
   );
 
   /*
@@ -308,7 +266,6 @@ export default function MobileWeatherGPT() {
 
     const loadAll = async () => {
       await Promise.allSettled([
-        fetchNowcast(currentCity, controller.signal),
         fetchNwp(currentCity, controller.signal),
         fetchSectorAdvisories(
           currentCity,
@@ -325,10 +282,9 @@ export default function MobileWeatherGPT() {
     return () => {
       controller.abort();
     };
-  }, [
+  },     [
     currentCity,
     activeSector,
-    fetchNowcast,
     fetchNwp,
     fetchSectorAdvisories,
     fetchAlerts,
@@ -885,25 +841,7 @@ export default function MobileWeatherGPT() {
           📈 Climate
         </button>
 
-        {/* SECOND ROW: Nowcast, NWP Models, Sectors */}
-
-        <button
-          type="button"
-          className={`nav-tab ${
-            activeTab === "nowcast" ? "active" : ""
-          }`}
-          onClick={() => setActiveTab("nowcast")}
-          style={{
-            width: "100%",
-            minWidth: 0,
-            maxWidth: "none",
-            boxSizing: "border-box",
-            whiteSpace: "nowrap",
-            justifyContent: "center",
-          }}
-        >
-          🌤️ Nowcast
-        </button>
+        {/* SECOND ROW: NWP Models, Sectors */}
 
         <button
           type="button"
@@ -1076,198 +1014,6 @@ export default function MobileWeatherGPT() {
             )}
 
             <div ref={messagesEndRef} />
-          </div>
-        )}
-
-        {/* NOWCAST */}
-
-        {activeTab === "nowcast" && (
-          <div className="nowcast-pane">
-            <div className="city-search-box">
-              <input
-                type="text"
-                value={currentCity}
-                onChange={(event) =>
-                  setCurrentCity(event.target.value)
-                }
-                placeholder="Enter city..."
-              />
-
-              <button
-                type="button"
-                onClick={() =>
-                  fetchNowcast(currentCity)
-                }
-              >
-                Fetch
-              </button>
-            </div>
-
-            {nowcastData ? (
-              <div className="metric-dashboard">
-                <div className="main-temp-card">
-                  <div className="card-top">
-                    <span className="card-city">
-                      {nowcastData.location?.name ??
-                        currentCity}
-                      {nowcastData.location?.country
-                        ? `, ${nowcastData.location.country}`
-                        : ""}
-                    </span>
-
-                    <span className="card-obs">
-                      {nowcastData.observedAt ??
-                        "Live"}
-                    </span>
-                  </div>
-
-                  <div className="temp-hero">
-                    <span className="temp-val">
-                      {Number.isFinite(
-                        Number(
-                          nowcastData.temperature
-                        )
-                      )
-                        ? Math.round(
-                            Number(
-                              nowcastData.temperature
-                            )
-                          )
-                        : "--"}
-                      °C
-                    </span>
-
-                    <span className="condition-pill">
-                      {nowcastData.weatherDescription ??
-                        "Unknown"}
-                    </span>
-                  </div>
-
-                  <div className="metrics-row">
-                    <div className="mini-metric">
-                      <span className="m-lbl">
-                        Feels Like
-                      </span>
-
-                      <span className="m-val">
-                        {nowcastData.apparentTemperature !=
-                        null
-                          ? `${Math.round(
-                              Number(
-                                nowcastData.apparentTemperature
-                              )
-                            )}°C`
-                          : "--"}
-                      </span>
-                    </div>
-
-                    <div className="mini-metric">
-                      <span className="m-lbl">
-                        Humidity
-                      </span>
-
-                      <span className="m-val">
-                        {nowcastData.humidity != null
-                          ? `${nowcastData.humidity}%`
-                          : "--"}
-                      </span>
-                    </div>
-
-                    <div className="mini-metric">
-                      <span className="m-lbl">
-                        Wind
-                      </span>
-
-                      <span className="m-val">
-                        {nowcastData.windSpeed != null
-                          ? `${nowcastData.windSpeed} km/h`
-                          : "--"}
-                      </span>
-                    </div>
-
-                    <div className="mini-metric">
-                      <span className="m-lbl">
-                        Pressure
-                      </span>
-
-                      <span className="m-val">
-                        {nowcastData.pressure != null
-                          ? `${nowcastData.pressure} hPa`
-                          : "--"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <h3 className="section-title">
-                  📅 7-Day Numerical Forecast
-                </h3>
-
-                <div className="forecast-scroll-row">
-                  {forecastDays.map(
-                    (day: any, index: number) => {
-                      const dateText =
-                        typeof day.date === "string"
-                          ? day.date.substring(5)
-                          : "--";
-
-                      return (
-                        <div
-                          key={
-                            day.date ??
-                            `forecast-${index}`
-                          }
-                          className="forecast-day-card"
-                        >
-                          <span className="f-date">
-                            {index === 0
-                              ? "Today"
-                              : index === 1
-                              ? "Tmrw"
-                              : dateText}
-                          </span>
-
-                          <span className="f-temp">
-                            {day.tempMax != null
-                              ? Math.round(
-                                  Number(
-                                    day.tempMax
-                                  )
-                                )
-                              : "--"}
-                            ° /{" "}
-                            {day.tempMin != null
-                              ? Math.round(
-                                  Number(
-                                    day.tempMin
-                                  )
-                                )
-                              : "--"}
-                            °
-                          </span>
-
-                          <span className="f-desc">
-                            {day.weatherDescription ??
-                              "Unknown"}
-                          </span>
-
-                          <span className="f-rain">
-                            🌧️{" "}
-                            {day.precipitationProbabilityMax ??
-                              "--"}
-                            %
-                          </span>
-                        </div>
-                      );
-                    }
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="loading-state">
-                Loading Nowcast telemetry...
-              </div>
-            )}
           </div>
         )}
 
