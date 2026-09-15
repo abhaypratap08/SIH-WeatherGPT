@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -9,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from agent import build_agent
+from agent import build_agent, geocode_place, get_weather
 from route_weather.analyzer import analyze_route
 from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
 from route_weather.geocoding import get_coordinates
@@ -255,8 +256,86 @@ def root():
     }
 
 
+
+def fast_weather_response(prompt: str, location: Optional[LocationPayload] = None) -> Optional[str]:
+    text = prompt.lower().strip()
+    weather_terms = (
+        "weather", "temperature", "temp", "rain", "rainfall",
+        "raining", "precipitation", "wind", "humidity",
+        "hot", "cold", "forecast"
+    )
+    if not any(term in text for term in weather_terms):
+        return None
+
+    if location:
+        weather_raw = get_weather.invoke({
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+        })
+        location_name = "your location"
+    else:
+        match = re.search(
+            r"\b(?:in|at|for|near)\s+([A-Za-z][A-Za-z .'-]*?)(?=\s+(?:today|tomorrow|now|currently|this week)\b|[?.!,]|$)",
+            prompt,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        place = match.group(1).strip()
+        geo_raw = geocode_place.invoke({"place_name": place})
+        geo = json.loads(geo_raw)
+
+        if "error" in geo:
+            return f"Sorry, I couldn't find {place}."
+
+        weather_raw = get_weather.invoke({
+            "latitude": geo["latitude"],
+            "longitude": geo["longitude"],
+        })
+        location_name = geo.get("name") or place
+
+    weather = json.loads(weather_raw)
+
+    if "error" in weather:
+        return "Sorry, I couldn't fetch the weather right now."
+
+    current = weather["current"]
+    today = weather["today_forecast"]
+
+    if "rain" in text or "precipitation" in text or "raining" in text:
+        chance = today["chance_of_rain_percent"]
+        amount = today["total_precipitation_mm"]
+        if chance is not None:
+            answer = f"{location_name}: today's rain chance is {chance}%"
+            if amount is not None:
+                answer += f", with about {amount} mm of precipitation expected"
+            return answer + "."
+    elif "temperature" in text or "temp" in text or "hot" in text or "cold" in text:
+        return (
+            f"{location_name}: currently {current['temperature_c']}°C, "
+            f"feels like {current['feels_like_c']}°C. "
+            f"Today's range is {today['min_temp_c']}°C to {today['max_temp_c']}°C."
+        )
+    elif "wind" in text:
+        return f"{location_name}: current wind speed is {current['windspeed_kmh']} km/h."
+    elif "humidity" in text:
+        return f"{location_name}: current humidity is {current['humidity_percent']}%."
+    else:
+        return (
+            f"{location_name}: {current['temperature_c']}°C, "
+            f"{current['condition']}, humidity {current['humidity_percent']}%, "
+            f"wind {current['windspeed_kmh']} km/h. "
+            f"Today's rain chance is {today['chance_of_rain_percent']}%."
+        )
+
+
 @app.post("/agent", response_model=AgentResponse)
 def weather_agent(request: AgentRequest):
+    fast_response = fast_weather_response(request.prompt, request.location)
+    if fast_response is not None:
+        return {"message": fast_response}
+
     messages: list[dict[str, str]] = []
 
     location_context = build_location_context(request.location)

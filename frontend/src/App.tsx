@@ -690,7 +690,7 @@ function AIChatView({ location }: { location: Coordinates | null }) {
       const d = await res.json();
       setMessages(p => [...p, { role:'assistant', content:d.message }]);
     } catch {
-      setMessages(p => [...p, { role:'assistant', content:"⚠️ Couldn't reach the AI backend. Make sure the Python ML server is running on :8000." }]);
+      setMessages(p => [...p, { role:'assistant', content:"⚠️ The AI service is temporarily unavailable. Please try again." }]);
     } finally { setLoading(false); }
   };
 
@@ -775,7 +775,7 @@ function AIChatView({ location }: { location: Coordinates | null }) {
           </div>
         </div>
         <p style={{ fontSize:'10.5px', textAlign:'center', color:'var(--text-muted)', margin:'8px 0 0' }}>
-          Powered by Ollama + LangChain · answers are grounded in live weather data
+          Powered by OpenRouter + LangChain · answers are grounded in live weather data
         </p>
       </div>
     </div>

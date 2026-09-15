@@ -62,7 +62,7 @@ export const CHAT_ENDPOINT =
 
 /**
  * AI agent chat
- * LangChain + Ollama + FastAPI
+ * LangChain + OpenRouter + FastAPI
  */
 export const ML_AGENT_ENDPOINT =
   `${ML_API_BASE}/agent`;
