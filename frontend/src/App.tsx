@@ -670,6 +670,7 @@ function AIChatView({ location }: { location: Coordinates | null }) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:'smooth' }); }, [messages, loading]);
+  useEffect(() => { textareaRef.current?.focus(); }, []);
 
   const send = async (override?: string) => {
     const prompt = (override ?? input).trim();
@@ -789,7 +790,7 @@ export default function App() {
   // ── Java-backend chat / nav state ──
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
-  const [activeNav, setActiveNav] = useState<NavPage>('forecast');
+  const [activeNav, setActiveNav] = useState<NavPage>('aichat');
   const [selectedLang, setSelectedLang] = useState('en');
   const [currentCity, setCurrentCity] = useState('Delhi');
   const [gpsCoords, setGpsCoords] = useState<Coordinates|null>(null);
@@ -1016,6 +1017,14 @@ export default function App() {
             <div className="header-title-group">
               <h1>WeatherGPT</h1>
               <p className="header-subtitle">AI-Powered Meteorological Intelligence</p>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:'8px', marginTop:'4px' }}>
+              <span style={{ fontSize:'10px', color:'var(--text-secondary)', background:'var(--glass-bg)', padding:'2px 8px', borderRadius:'12px', border:'1px solid var(--glass-border)' }}>
+                {gpsCoords ? `📍 ${gpsCoords.latitude.toFixed(2)}, ${gpsCoords.longitude.toFixed(2)}` : locationStatus === 'denied' ? '📍 Location blocked' : locationStatus === 'unsupported' ? '📍 No GPS' : '📍 Set location'}
+              </span>
+              <button onClick={requestLocation} style={{ fontSize:'10px', padding:'2px 6px', borderRadius:'12px', border:'1px solid var(--accent-cyan)', background:'var(--accent-cyan-dim)', color:'var(--accent-cyan)', cursor:'pointer' }}>
+                Set
+              </button>
             </div>
           </div>
 

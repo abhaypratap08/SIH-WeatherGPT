@@ -115,6 +115,12 @@ export default function MobileWeatherGPT() {
     });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, []);
+
   /*
    * Stop speech when changing language.
    */
