@@ -1249,36 +1249,37 @@ export default function App() {
             )}
           </div>
 
-          {/* Java-backend chat flow */}
-          <div className="simple-chat">
-            {messages.map(msg => (
-              <div key={msg.id} className={`message ${msg.role}`}>
-                <div className="message-bubble">
-                  {msg.content.split('\n').map((line, i) => (
-                    <p key={i} className={line.startsWith('•')?'message-bullet':line.startsWith('**')?'message-bold':''}>
-                      {line.replace(/\*\*/g,'')}
-                    </p>
-                  ))}
-                  {msg.role==='bot' && (
-                    <button className="read-aloud-btn" onClick={() => handleSpeakText(msg)}
-                      style={{ background:'transparent', border:'none', color:'#38bdf8', cursor:'pointer', display:'flex', alignItems:'center', gap:'4px', marginTop:'6px', fontSize:'12px' }}>
-                      {isSpeaking&&isSpeakingId===msg.id ? <VolumeX size={14}/> : <Volume2 size={14}/>}
-                      <span>{isSpeaking&&isSpeakingId===msg.id?'Stop Speech':'Listen'}</span>
-                    </button>
-                  )}
+          {activeNav==='aichat' && (
+            <div className="simple-chat">
+              {messages.map(msg => (
+                <div key={msg.id} className={`message ${msg.role}`}>
+                  <div className="message-bubble">
+                    {msg.content.split('\n').map((line, i) => (
+                      <p key={i} className={line.startsWith('•')?'message-bullet':line.startsWith('**')?'message-bold':''}>
+                        {line.replace(/\*\*/g,'')}
+                      </p>
+                    ))}
+                    {msg.role==='bot' && (
+                      <button className="read-aloud-btn" onClick={() => handleSpeakText(msg)}
+                        style={{ background:'transparent', border:'none', color:'#38bdf8', cursor:'pointer', display:'flex', alignItems:'center', gap:'4px', marginTop:'6px', fontSize:'12px' }}>
+                          {isSpeaking&&isSpeakingId===msg.id ? <VolumeX size={14}/> : <Volume2 size={14}/>}
+                          <span>{isSpeaking&&isSpeakingId===msg.id?'Stop Speech':'Listen'}</span>
+                        </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {isLoading && (
-              <div className="message bot typing">
-                <div className="typing-dots"><span/><span/><span/></div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+              ))}
+              {isLoading && (
+                <div className="message bot typing">
+                  <div className="typing-dots"><span/><span/><span/></div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
 
-          {/* Input area */}
-          <div className="input-area">
+          {activeNav==='aichat' && (
+            <div className="input-area">
             <div className="input-container">
               <input ref={inputRef} type="text"
                 placeholder={voiceEnabled ? `Listening in ${activeLangObj.label}…` : `Ask WeatherGPT in ${activeLangObj.label}… (e.g. 'Rain in Delhi')`}
@@ -1289,7 +1290,8 @@ export default function App() {
               <button className="send-btn" onClick={() => handleSend()} disabled={!input.trim()||isLoading} aria-label="Send"><Send size={18}/></button>
             </div>
             <p className="input-hint">Multilingual ({activeLangObj.label}) · Enter to send · MoES / IMD Aligned</p>
-          </div>
+            </div>
+          )}
 
           <footer className="simple-footer">
             <p>WeatherGPT · MoES / IMD · Open-Meteo · Ollama (llama3.2)</p>
