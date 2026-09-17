@@ -23,7 +23,7 @@
   width: 100%;
   max-width: 600px;
   margin: 0 auto;
-  background: radial-gradient(circle at 50% 20%, #0f172a 0%, #060913 100%);
+  background: #0f172a;
   color: var(--text-primary);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overflow: hidden;
@@ -189,7 +189,7 @@
 }
 
 .nav-tab.active {
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.3), rgba(6, 182, 212, 0.3));
+  background: var(--accent-cyan-dim);
   border-color: var(--accent-cyan);
   color: var(--text-primary);
 }
@@ -314,9 +314,9 @@
 }
 
 .user-message-bubble {
-  background: linear-gradient(135deg, #0284c7, #0369a1);
+  background: #0284c7;
   color: white;
-  border-radius: 14px 14px 4px 14px;
+  border-radius: 0;
   padding: 10px 14px;
   font-size: 13.5px;
   line-height: 1.4;
@@ -470,13 +470,7 @@
 .cat-badge { background: #0284c7; color: white; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
 .code-box { background: #020617; padding: 8px; border-radius: 6px; font-size: 11px; margin-bottom: 8px; overflow-x: auto; }
 
-.metric-pills {
-  display: flex;
-  gap: 12px;
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
+
 
 /* Alerts Pane */
 .alerts-list {
@@ -605,8 +599,8 @@
 
 .bar-anomaly { font-size: 9px; color: #f87171; margin-bottom: 2px; }
 .bar-fill { width: 14px; border-radius: 4px 4px 0 0; }
-.bar-fill.pos { background: linear-gradient(180deg, #ef4444, #f97316); }
-.bar-fill.neg { background: linear-gradient(180deg, #38bdf8, #0284c7); }
+.bar-fill.pos { background: #ef4444; }
+.bar-fill.neg { background: #38bdf8; }
 .bar-year { font-size: 9px; color: var(--text-muted); margin-top: 4px; }
 
 .climate-insights-box h4 { margin: 0 0 6px; font-size: 12.5px; color: #38bdf8; }
@@ -675,8 +669,8 @@
 .mobile-send-btn {
   width: 38px;
   height: 38px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #0284c7, #06b6d4);
+  border-radius: 0;
+  background: #0284c7;
   border: none;
   color: white;
   display: flex;

@@ -458,28 +458,6 @@ html, body {
   margin: 0;
 }
 
-.header-weather-pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-full);
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.header-weather-pill .pill-temp {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--accent-cyan-bright);
-}
-
-.header-weather-pill .pill-dot {
-  color: var(--text-muted);
-}
-
 .header-actions {
   display: flex;
   align-items: center;
