@@ -1,58 +1,48 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3,
-  Bell,
+  Anchor,
+  Building2,
   CheckCircle,
-  Cloud,
-  Cpu,
+  CloudRain,
   Droplets,
-  Layers,
-  MapPin,
-  Mic,
-  Radar,
-  Send,
+  Flame,
+  Map as MapIcon,
+  Plane,
+  SprayCan,
+  Sprout,
+  Thermometer,
   TrendingUp,
-  Volume2,
-  VolumeX,
+  Waves,
   Wind,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import './App.css';
-import ChatDrawer from './components/ChatDrawer';
-import MobileChatToggle from './components/MobileChatToggle';
-import MobileWeatherGPT from './components/MobileWeatherGPT';
+import AIChatWorkspace from './components/AIChatWorkspace';
+import AppHeader from './components/AppHeader';
+import IconRail from './components/IconRail';
+import MobileDrawer from './components/MobileDrawer';
+import WarningBulletin from './components/WarningBulletin';
+import type { ImdSeverity, ImdWarning } from './components/WarningBulletin';
+import WeatherMapView from './components/WeatherMapView';
+import WeatherRadarView from './components/WeatherRadarView';
+import type { NavPage } from './config/navigation';
 import {
   ADVISORIES_ENDPOINT,
   ALERTS_ENDPOINT,
-  CHAT_ENDPOINT,
   CLIMATE_ENDPOINT,
-  ML_AGENT_ENDPOINT,
   ML_ROUTE_ENDPOINT,
   WEATHER_ENDPOINTS,
 } from './config/api';
-import { useVoiceInput } from './hooks/useVoiceInput';
-import { useVoiceOutput } from './hooks/useVoiceOutput';
+import { useTheme } from './hooks/useTheme';
+import { reverseGeocodeLabel, useLocation } from './location/LocationContext';
 
 // ─────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────
-
-type MessageRole = 'user' | 'bot';
-type NavPage =
-  | 'forecast' | 'nwp' | 'sectors' | 'alerts' | 'climate'
-  | 'aichat' | 'route' | 'report' | 'map' | 'radar';
-
-interface AiMessage { role: 'user' | 'assistant'; content: string; }
-interface Coordinates { latitude: number; longitude: number; accuracy?: number; }
-type LocationStatus = 'pending' | 'granted' | 'denied' | 'unsupported';
 
 interface RouteApiResponse {
   message?: string;
   route_info?: any;
   risk_summary?: { HIGH?: number; MODERATE?: number; LOW?: number };
   weather_data?: WeatherPoint[] | any;
-  map_json?: any;
   index_html?: string;
 }
 interface WeatherPoint {
@@ -79,26 +69,29 @@ interface ForecastRecord {
 // Constants
 // ─────────────────────────────────────────────────────────────────────
 
-const LANGUAGES = [
-  { code: 'en', label: 'English',             speechLocale: 'en-IN' },
-  { code: 'hi', label: 'हिन्दी (Hindi)',       speechLocale: 'hi-IN' },
-  { code: 'ta', label: 'தமிழ் (Tamil)',        speechLocale: 'ta-IN' },
-  { code: 'te', label: 'తెలుగు (Telugu)',      speechLocale: 'te-IN' },
-  { code: 'bn', label: 'বাংলা (Bengali)',      speechLocale: 'bn-IN' },
-  { code: 'mr', label: 'मराठी (Marathi)',      speechLocale: 'mr-IN' },
-  { code: 'gu', label: 'ગુજરાતી (Gujarati)',   speechLocale: 'gu-IN' },
-];
-
 const WEATHER_CODE_DESCRIPTIONS: Record<number, string> = {
-  0:'☀️ Clear', 1:'🌤️ Mainly clear', 2:'⛅ Partly cloudy', 3:'☁️ Cloudy',
-  45:'🌫️ Fog', 48:'🌫️ Fog', 51:'🌦️ Light drizzle', 53:'🌦️ Drizzle',
-  55:'🌧️ Heavy drizzle', 61:'🌦️ Light rain', 63:'🌧️ Rain', 65:'🌧️ Heavy rain',
-  71:'🌨️ Light snow', 73:'❄️ Snow', 75:'❄️ Heavy snow',
-  80:'🌦️ Rain showers', 81:'🌧️ Rain showers', 82:'🌧️ Heavy showers',
-  95:'⛈️ Thunderstorm', 96:'⛈️ Thunderstorm + hail', 99:'⛈️ Thunderstorm + hail',
+  0: 'Clear', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+  45: 'Fog', 48: 'Fog', 51: 'Light drizzle', 53: 'Drizzle',
+  55: 'Heavy drizzle', 61: 'Light rain', 63: 'Rain', 65: 'Heavy rain',
+  71: 'Light snow', 73: 'Snow', 75: 'Heavy snow',
+  80: 'Rain showers', 81: 'Rain showers', 82: 'Heavy showers',
+  95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with hail',
 };
-const wmoDesc = (code: number) => WEATHER_CODE_DESCRIPTIONS[code] ?? '🌤️ Unknown';
-const REPORT_CACHE_KEY = 'weatherGPT_offline_forecast';
+const wmoDesc = (code: number) => WEATHER_CODE_DESCRIPTIONS[code] ?? 'Unknown';
+
+// Dev-only demo seam so components can be previewed without mutating the
+// deployed backend (open the app with ?demo=1 in dev).
+const IS_DEMO = import.meta.env.DEV
+  && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).get('demo') === '1';
+
+const DEMO_WARNING: ImdWarning = {
+  district: 'Sitamarhi district',
+  severity: 'orange',
+  title: 'Heavy to very heavy rainfall warning',
+  text: '"Isolated heavy to very heavy rainfall (7-20 cm) very likely at one or two places over Sitamarhi and adjoining districts during the next 48 hours, with possibility of localised flooding in low-lying areas."',
+  issuedAt: '05:30 IST, 23 Sep',
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Weather report helpers (offline-capable)
@@ -113,16 +106,6 @@ async function geocodeCity(city: string): Promise<GeoResult> {
   return { latitude: r.latitude, longitude: r.longitude, name: r.name, country: r.country };
 }
 
-async function reverseGeocodeForReport(lat: number, lon: number): Promise<string> {
-  try {
-    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&zoom=10`);
-    if (!res.ok) throw new Error('');
-    const d = await res.json();
-    const a = d.address ?? {};
-    return a.city ?? a.town ?? a.village ?? a.county ?? d.display_name ?? 'Current location';
-  } catch { return 'Current location'; }
-}
-
 async function fetchForecastRecord(place: GeoResult): Promise<ForecastRecord> {
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}` +
@@ -135,63 +118,126 @@ async function fetchForecastRecord(place: GeoResult): Promise<ForecastRecord> {
   return {
     location: place, savedAt: new Date().toISOString(),
     hourly24h: {
-      time: d.hourly.time.slice(0,24), temperature: d.hourly.temperature_2m.slice(0,24),
-      humidity: d.hourly.relative_humidity_2m.slice(0,24),
-      precipitationProbability: d.hourly.precipitation_probability.slice(0,24),
-      weatherCode: d.hourly.weather_code.slice(0,24), wind: d.hourly.wind_speed_10m.slice(0,24),
+      time: d.hourly.time.slice(0, 24), temperature: d.hourly.temperature_2m.slice(0, 24),
+      humidity: d.hourly.relative_humidity_2m.slice(0, 24),
+      precipitationProbability: d.hourly.precipitation_probability.slice(0, 24),
+      weatherCode: d.hourly.weather_code.slice(0, 24), wind: d.hourly.wind_speed_10m.slice(0, 24),
     },
     daily7days: {
-      time: d.daily.time.slice(0,7), weatherCode: d.daily.weather_code.slice(0,7),
-      maxTemperature: d.daily.temperature_2m_max.slice(0,7),
-      minTemperature: d.daily.temperature_2m_min.slice(0,7),
-      precipitationProbability: d.daily.precipitation_probability_max.slice(0,7),
-      maxWind: d.daily.wind_speed_10m_max.slice(0,7),
+      time: d.daily.time.slice(0, 7), weatherCode: d.daily.weather_code.slice(0, 7),
+      maxTemperature: d.daily.temperature_2m_max.slice(0, 7),
+      minTemperature: d.daily.temperature_2m_min.slice(0, 7),
+      precipitationProbability: d.daily.precipitation_probability_max.slice(0, 7),
+      maxWind: d.daily.wind_speed_10m_max.slice(0, 7),
     },
   };
 }
-function loadCachedForecast(): ForecastRecord | null {
-  try { return JSON.parse(localStorage.getItem(REPORT_CACHE_KEY) ?? 'null'); } catch { return null; }
+/**
+ * Per-location cache key so a Delhi response can never satisfy a Ghaziabad
+ * request (§22): the key embeds the coordinates.
+ */
+function reportCacheKey(lat: number, lon: number): string {
+  return `weatherGPT_offline_forecast_${lat.toFixed(2)}_${lon.toFixed(2)}`;
 }
-function saveForecast(r: ForecastRecord) {
-  try { localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify(r)); } catch { /* full */ }
+function loadCachedForecast(lat: number, lon: number): ForecastRecord | null {
+  try { return JSON.parse(localStorage.getItem(reportCacheKey(lat, lon)) ?? 'null'); } catch { return null; }
+}
+function saveForecast(r: ForecastRecord, lat: number, lon: number) {
+  try { localStorage.setItem(reportCacheKey(lat, lon), JSON.stringify(r)); } catch { /* storage full */ }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Shared card styles (used by Route + Report views)
+// IMD severity helpers (bulletin + alerts list)
+// ─────────────────────────────────────────────────────────────────────
+
+function severityOf(a: any): ImdSeverity {
+  const raw = [a?.severity, a?.informationClass, a?.description, a?.title]
+    .filter(Boolean).join(' ').toLowerCase();
+  if (/\bred\b/.test(raw)) return 'red';
+  if (/\borange\b/.test(raw)) return 'orange';
+  if (/\byellow\b/.test(raw)) return 'yellow';
+  if (/\bgreen\b/.test(raw)) return 'green';
+  return 'red';
+}
+
+const tierBadge = (sev: ImdSeverity | undefined): React.CSSProperties => {
+  switch (sev) {
+    case 'green': return { background: 'var(--watch-green-tint)', color: 'var(--watch-green)', borderColor: 'var(--watch-green)' };
+    case 'yellow': return { background: 'var(--watch-yellow-tint)', color: 'var(--watch-yellow-deep)', borderColor: 'var(--watch-yellow)' };
+    case 'orange': return { background: 'var(--watch-orange-tint)', color: 'var(--watch-orange-deep)', borderColor: 'var(--watch-orange)' };
+    case 'red': return { background: 'var(--watch-red-tint)', color: 'var(--watch-red-deep)', borderColor: 'var(--watch-red)' };
+    default: return { background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' };
+  }
+};
+
+const tierBorder = (sev: ImdSeverity): string => {
+  switch (sev) {
+    case 'green': return 'var(--watch-green)';
+    case 'yellow': return 'var(--watch-yellow)';
+    case 'orange': return 'var(--watch-orange)';
+    case 'red': return 'var(--watch-red)';
+    default: return 'var(--slate-teal)';
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Shared card styles (Route + Report + secondary pages)
 // ─────────────────────────────────────────────────────────────────────
 
 const S: Record<string, React.CSSProperties> = {
-  scrollWrap:   { width:'100%', height:'100%', overflowY:'auto', overflowX:'hidden', padding:'20px 16px', boxSizing:'border-box' },
-  container:    { width:'100%', maxWidth:'1400px', margin:'0 auto', display:'flex', flexDirection:'column', gap:'18px', boxSizing:'border-box' },
-  card:         { background:'rgba(10,22,36,0.55)', padding:'18px', borderRadius:'12px', border:'1px solid rgba(0,229,255,0.12)' },
-  cardTitle:    { margin:'0 0 14px', fontSize:'1rem', fontWeight:700, color:'#e0f7ff' },
-  label:        { fontSize:'0.75rem', fontWeight:600, color:'#7ab8d4' },
-  input:        { padding:'10px 13px', borderRadius:'8px', border:'1px solid rgba(0,229,255,0.2)', background:'rgba(5,11,18,0.8)', color:'#e8f4fc', fontSize:'0.9rem', outline:'none', width:'100%', boxSizing:'border-box' },
-  btn:          { padding:'12px 24px', background:'linear-gradient(120deg,#00c8ff 0%,#0078ff 100%)', color:'#050b12', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:700, fontSize:'0.92rem', width:'100%' },
-  error:        { padding:'12px 16px', background:'rgba(229,101,74,0.12)', border:'1px solid rgba(229,101,74,0.3)', color:'#f0a08c', borderRadius:'8px', fontSize:'0.875rem' },
-  successBanner:{ background:'rgba(0,229,255,0.08)', border:'1px solid rgba(0,229,255,0.25)', color:'#67e8f9', padding:'11px 15px', borderRadius:'8px', fontWeight:500, fontSize:'0.88rem' },
-  badge:        { display:'inline-block', padding:'3px 9px', borderRadius:'12px', fontWeight:600, fontSize:'0.7rem', border:'1px solid transparent' },
-  tableWrap:    { width:'100%', overflowX:'auto', borderRadius:'8px', border:'1px solid rgba(0,229,255,0.1)' },
-  table:        { width:'100%', borderCollapse:'collapse', textAlign:'left', fontSize:'0.85rem' },
-  th:           { borderBottom:'1px solid rgba(0,229,255,0.12)', padding:'10px 13px', background:'rgba(0,229,255,0.03)', fontWeight:600, color:'#7ab8d4', whiteSpace:'nowrap' },
-  tr:           { borderBottom:'1px solid rgba(0,229,255,0.05)' },
-  td:           { padding:'10px 13px', whiteSpace:'nowrap', color:'#b8d4e8' },
-  tdBold:       { padding:'10px 13px', fontWeight:600, whiteSpace:'nowrap', color:'#e0f7ff' },
-  tdIndex:      { padding:'10px 13px', color:'#4a6a7d', width:'36px' },
-  tdDesc:       { padding:'10px 13px', color:'#7ab8d4', minWidth:'180px', wordBreak:'break-word' },
-  jsonBlock:    { background:'rgba(5,11,18,0.8)', padding:'13px', borderRadius:'8px', overflowX:'auto', fontSize:'0.78rem', color:'#67e8f9', margin:0, border:'1px solid rgba(0,229,255,0.07)' },
-  mapWrapper:   { width:'100%', borderRadius:'8px', overflow:'hidden', border:'1px solid rgba(0,229,255,0.15)', background:'#fff' },
-  iframe:       { width:'100%', height:'380px', border:'none', display:'block' },
+  card: { background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px' },
+  cardTitle: { margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--ink)' },
+  label: { fontSize: '11px', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted)' },
+  input: { padding: '10px 13px', borderRadius: 'var(--radius-card)', border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink)', fontSize: '14px', outline: 'none', width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-ui)' },
+  btn: { padding: '11px 20px', background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', border: '1px solid var(--slate-teal)', borderRadius: 'var(--radius-btn)', cursor: 'pointer', fontWeight: 700, fontSize: '13.5px', fontFamily: 'var(--font-ui)' },
+  error: { padding: '11px 15px', background: 'var(--watch-red-tint)', border: '1px solid var(--watch-red)', color: 'var(--watch-red-deep)', borderRadius: 'var(--radius-card)', fontSize: '13px' },
+  successBanner: { padding: '11px 15px', background: 'var(--slate-teal-tint)', border: '1px solid var(--slate-teal)', color: 'var(--slate-teal)', borderRadius: 'var(--radius-card)', fontWeight: 500, fontSize: '13px' },
+  badge: { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '2px 9px', borderRadius: 'var(--radius-chip)', fontWeight: 600, fontSize: '11px', border: '1px solid transparent' },
+  tableWrap: { width: '100%', overflowX: 'auto', borderRadius: 'var(--radius-card)', border: '1px solid var(--line)' },
+  table: { width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' },
+  th: { borderBottom: '1px solid var(--line)', padding: '9px 13px', background: 'var(--mist)', fontWeight: 700, color: 'var(--muted)', whiteSpace: 'nowrap', fontSize: '11px', textTransform: 'uppercase' },
+  tr: { borderBottom: '1px solid var(--line)' },
+  td: { padding: '9px 13px', whiteSpace: 'nowrap', color: 'var(--ink)' },
+  tdBold: { padding: '9px 13px', fontWeight: 600, whiteSpace: 'nowrap', color: 'var(--ink)' },
+  tdIndex: { padding: '9px 13px', color: 'var(--muted)', width: '36px' },
+  tdDesc: { padding: '9px 13px', color: 'var(--ink)', minWidth: '180px', wordBreak: 'break-word', whiteSpace: 'normal' },
+  jsonBlock: { background: 'var(--mist)', padding: '13px', borderRadius: 'var(--radius-card)', overflowX: 'auto', fontSize: '12px', color: 'var(--ink)', margin: 0, border: '1px solid var(--line)', fontFamily: 'var(--font-mono)' },
+  mapWrapper: { width: '100%', borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid var(--line)', background: 'var(--paper)' },
+  iframe: { width: '100%', height: '380px', border: 'none', display: 'block' },
+};
+
+// Token-based panel for rail/drawer destinations.
+const P: Record<string, React.CSSProperties> = {
+  panel: { background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' },
+  h2: { margin: 0, fontSize: '19px', fontWeight: 600, color: 'var(--ink)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' },
+  metaCard: { background: 'var(--mist)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', padding: '10px 12px' },
+  mono: { fontFamily: 'var(--font-mono)' },
 };
 
 const riskStyle = (risk?: string): React.CSSProperties => {
   switch (String(risk ?? '').toUpperCase()) {
-    case 'HIGH':     return { background:'rgba(229,101,74,0.16)', color:'#f0a08c', borderColor:'rgba(229,101,74,0.35)' };
-    case 'MODERATE': return { background:'rgba(224,166,63,0.16)', color:'#f0cf8f', borderColor:'rgba(224,166,63,0.35)' };
-    case 'LOW':      return { background:'rgba(0,229,255,0.1)',   color:'#67e8f9', borderColor:'rgba(0,229,255,0.3)' };
-    default:         return { background:'rgba(154,164,182,0.16)',color:'#c3cad6', borderColor:'rgba(154,164,182,0.35)' };
+    case 'HIGH': return { background: 'var(--watch-red-tint)', color: 'var(--watch-red-deep)', borderColor: 'var(--watch-red)' };
+    case 'MODERATE': return { background: 'var(--watch-orange-tint)', color: 'var(--watch-orange-deep)', borderColor: 'var(--watch-orange)' };
+    case 'LOW': return { background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' };
+    default: return { background: 'var(--mist)', color: 'var(--muted)', borderColor: 'var(--line)' };
   }
 };
+
+/**
+ * Build a user-safe HTTP error message that captures status, statusText and —
+ * when the backend returns an ApiResponse envelope — its `message` field.
+ * The raw body is never echoed wholesale; only the envelope's message is used.
+ */
+async function describeHttpError(res: Response): Promise<string> {
+  let detail = '';
+  try {
+    const body = await res.json();
+    if (body && typeof body.message === 'string' && body.message) detail = `: ${body.message}`;
+  } catch {
+    /* non-JSON error body — status/statusText is enough */
+  }
+  return `HTTP ${res.status} ${res.statusText ?? ''}${detail}`.trim();
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // ClimateMapEmbed — OSM map inside climate panel
@@ -204,202 +250,51 @@ function ClimateMapEmbed({ city }: { city: string }) {
 
   useEffect(() => {
     if (!ref.current || mapRef.current) return;
-    if (!document.querySelector('link[href*="leaflet"]')) {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
-    }
+    let cancelled = false;
     import('leaflet').then((L) => {
-      delete (L.Icon.Default.prototype as any)._getIconUrl;
-      L.Icon.Default.mergeOptions({
-        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        iconUrl:       'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl:     'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-      });
+      if (mapRef.current) return;
       fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`)
         .then(r => r.json())
         .then(data => {
+          if (cancelled || mapRef.current) return;
           const r = data.results?.[0];
           const lat = r?.latitude ?? 20.5937;
           const lng = r?.longitude ?? 78.9629;
-          if (mapRef.current) return;
-          const map = L.map(ref.current!, { center: [lat, lng], zoom: 7 });
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          const map = L.map(ref.current!, { center: [lat, lng], zoom: 7, scrollWheelZoom: false });
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
           }).addTo(map);
-          L.tileLayer('https://tile.openweathermap.org/map/temp_new/{z}/{x}/{y}.png?appid=demo',
-            { opacity: 0.45, attribution: 'Weather &copy; OpenWeatherMap' }).addTo(map);
-          L.marker([lat, lng]).addTo(map).bindPopup(`📍 ${city}`).openPopup();
+          const icon = L.divIcon({
+            className: '',
+            html: '<div class="map-loc-dot"></div>',
+            iconSize: [12, 12], iconAnchor: [6, 6],
+          });
+          L.marker([lat, lng], { icon }).addTo(map).bindPopup(city);
           mapRef.current = map;
-          setLoaded(true);
+          if (!cancelled) setLoaded(true);
         })
         .catch(() => {
-          if (mapRef.current) return;
-          const map = L.map(ref.current!, { center: [20.5937, 78.9629], zoom: 5 });
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+          if (cancelled || mapRef.current) return;
+          const map = L.map(ref.current!, { center: [20.5937, 78.9629], zoom: 5, scrollWheelZoom: false });
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
           mapRef.current = map;
-          setLoaded(true);
+          if (!cancelled) setLoaded(true);
         });
     });
-    return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
+    return () => {
+      cancelled = true;
+      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+    };
   }, [city]);
 
   return (
-    <div style={{ position:'relative', height:'280px', width:'100%' }}>
+    <div style={{ position: 'relative', height: '280px', width: '100%' }}>
       {!loaded && (
-        <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(5,11,18,0.8)', zIndex:10, color:'#7ab8d4', fontSize:'13px' }}>
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--mist)', zIndex: 10, color: 'var(--muted)', fontSize: '13px' }}>
           Loading map…
         </div>
       )}
-      <div ref={ref} style={{ width:'100%', height:'100%' }} />
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// WeatherMapView — full-screen map page
-// ─────────────────────────────────────────────────────────────────────
-
-function WeatherMapView({ location }: { location: Coordinates | null }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<any>(null);
-  const markerRef = useRef<any>(null);
-  const [layer, setLayer] = useState<'standard'|'temperature'|'precipitation'|'wind'>('standard');
-
-  useEffect(() => {
-    if (!ref.current || mapRef.current) return;
-    if (!document.querySelector('link[href*="leaflet"]')) {
-      const link = document.createElement('link'); link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
-    }
-    import('leaflet').then((L) => {
-      delete (L.Icon.Default.prototype as any)._getIconUrl;
-      L.Icon.Default.mergeOptions({
-        iconRetinaUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        iconUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-      });
-      const map = L.map(ref.current!, { center:[location?.latitude??20.5937, location?.longitude??78.9629], zoom:5 });
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OpenStreetMap contributors', maxZoom:18 }).addTo(map);
-      mapRef.current = map;
-      if (location) {
-        markerRef.current = L.marker([location.latitude, location.longitude])
-          .addTo(map).bindPopup(`📍 Your Location`).openPopup();
-      }
-    });
-    return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
-  }, []);
-
-  useEffect(() => {
-    if (!mapRef.current || !location) return;
-    import('leaflet').then((L) => {
-      if (markerRef.current) markerRef.current.setLatLng([location.latitude, location.longitude]);
-      else markerRef.current = L.marker([location.latitude, location.longitude]).addTo(mapRef.current).bindPopup('📍 Your Location').openPopup();
-      mapRef.current.setView([location.latitude, location.longitude], 8);
-    });
-  }, [location]);
-
-  const switchLayer = (type: typeof layer) => {
-    setLayer(type);
-    if (!mapRef.current) return;
-    import('leaflet').then((L) => {
-      const map = mapRef.current;
-      map.eachLayer((l: any) => { if (l instanceof L.TileLayer) map.removeLayer(l); });
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OpenStreetMap contributors', maxZoom:18 }).addTo(map);
-      const overlays: Record<string,string> = {
-        temperature:   'https://tile.openweathermap.org/map/temp_new/{z}/{x}/{y}.png?appid=demo',
-        precipitation: 'https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=demo',
-        wind:          'https://tile.openweathermap.org/map/wind_new/{z}/{x}/{y}.png?appid=demo',
-      };
-      if (type !== 'standard' && overlays[type])
-        L.tileLayer(overlays[type], { opacity:0.55, attribution:'Weather &copy; OpenWeatherMap' }).addTo(map);
-    });
-  };
-
-  const layers: {id: typeof layer; label: string; emoji: string}[] = [
-    {id:'standard',      label:'Standard',    emoji:'🗺️'},
-    {id:'temperature',   label:'Temperature', emoji:'🌡️'},
-    {id:'precipitation', label:'Rain',        emoji:'🌧️'},
-    {id:'wind',          label:'Wind',        emoji:'💨'},
-  ];
-
-  return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100%', width:'100%' }}>
-      <div style={{ padding:'10px 16px', background:'var(--glass-bg)', borderBottom:'1px solid var(--glass-border)', display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', flexShrink:0 }}>
-        <span style={{ fontSize:'12px', color:'var(--text-secondary)', fontWeight:600, marginRight:'4px' }}>Layer:</span>
-        {layers.map(b => (
-          <button key={b.id} onClick={() => switchLayer(b.id)} style={{
-            padding:'5px 12px', borderRadius:'20px', border:'1px solid',
-            borderColor: layer===b.id ? 'var(--accent-cyan)' : 'var(--glass-border)',
-            background:  layer===b.id ? 'var(--accent-cyan-dim)' : 'transparent',
-            color:       layer===b.id ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-            fontSize:'12px', fontWeight:600, cursor:'pointer',
-          }}>{b.emoji} {b.label}</button>
-        ))}
-        {location && <span style={{ marginLeft:'auto', fontSize:'11px', color:'var(--text-muted)' }}>📍 {location.latitude.toFixed(4)}, {location.longitude.toFixed(4)}</span>}
-      </div>
-      <div style={{ flex:1, position:'relative', overflow:'hidden' }}>
-        <div ref={ref} style={{ width:'100%', height:'100%', background:'#071018' }} />
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// InteractiveRadarView
-// ─────────────────────────────────────────────────────────────────────
-
-function InteractiveRadarView({ location }: { location: Coordinates | null }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<any>(null);
-
-  useEffect(() => {
-    if (!ref.current || mapRef.current) return;
-    if (!document.querySelector('link[href*="leaflet"]')) {
-      const link = document.createElement('link'); link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
-    }
-    import('leaflet').then((L) => {
-      delete (L.Icon.Default.prototype as any)._getIconUrl;
-      L.Icon.Default.mergeOptions({
-        iconRetinaUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        iconUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-      });
-      const map = L.map(ref.current!, { center:[location?.latitude??20.5937, location?.longitude??78.9629], zoom:5 });
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:18,
-      }).addTo(map);
-      L.tileLayer('https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=demo',
-        { opacity:0.65, attribution:'Weather &copy; OpenWeatherMap' }).addTo(map);
-      L.tileLayer('https://tile.openweathermap.org/map/clouds_new/{z}/{x}/{y}.png?appid=demo',
-        { opacity:0.4, attribution:'Clouds &copy; OpenWeatherMap' }).addTo(map);
-      if (location) {
-        const icon = L.divIcon({
-          className:'',
-          html:`<div style="width:14px;height:14px;background:rgba(0,229,255,0.9);border-radius:50%;border:2px solid white;box-shadow:0 0 0 4px rgba(0,229,255,0.3)"></div>`,
-          iconSize:[14,14], iconAnchor:[7,7],
-        });
-        L.marker([location.latitude, location.longitude], { icon }).addTo(map).bindPopup('📍 Your Location');
-      }
-      mapRef.current = map;
-    });
-    return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
-  }, []);
-
-  return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100%', width:'100%' }}>
-      <div style={{ padding:'10px 16px', background:'var(--glass-bg)', borderBottom:'1px solid var(--glass-border)', display:'flex', gap:'12px', alignItems:'center', flexShrink:0 }}>
-        <Radar size={16} style={{ color:'var(--accent-cyan)' }} />
-        <span style={{ fontSize:'13px', fontWeight:700, color:'var(--text-primary)' }}>Live Precipitation & Cloud Radar</span>
-        <span style={{ fontSize:'11px', color:'var(--text-muted)', marginLeft:'auto' }}>OpenStreetMap + OpenWeatherMap tiles</span>
-      </div>
-      <div style={{ flex:1, position:'relative', overflow:'hidden' }}>
-        <div ref={ref} style={{ width:'100%', height:'100%', background:'#050b12' }} />
-      </div>
+      <div ref={ref} style={{ width: '100%', height: '100%' }} />
     </div>
   );
 }
@@ -409,116 +304,126 @@ function InteractiveRadarView({ location }: { location: Coordinates | null }) {
 // ─────────────────────────────────────────────────────────────────────
 
 function RouteWeatherView() {
-  const [form, setForm] = useState({ origin:'Delhi', destination:'Agra', departure_time:'08:00' });
+  // The route planner is a user-driven journey form: origin defaults to the
+  // currently selected location, but the fields stay freely editable (a route
+  // analysis is not the same thing as "the selected weather location").
+  const { location: currentLocation } = useLocation();
+  const [form, setForm] = useState({ origin: currentLocation.name || 'Delhi', destination: 'Agra', departure_time: '08:00' });
   const [loading, setLoading] = useState(false);
-  const [resp, setResp] = useState<RouteApiResponse|null>(null);
-  const [err, setErr] = useState<string|null>(null);
+  const [resp, setResp] = useState<RouteApiResponse | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); setLoading(true); setErr(null); setResp(null);
     try {
-      const res = await fetch(ML_ROUTE_ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(form) });
+      const res = await fetch(ML_ROUTE_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) });
       if (!res.ok) throw new Error(`Error ${res.status} - ${res.statusText}`);
       setResp(await res.json());
     } catch (e: any) { setErr(e.message || 'Failed to fetch route weather.'); }
     finally { setLoading(false); }
   };
 
+  const riskBoxes: { key: string; fg: string; bg: string; border: string }[] = [
+    { key: 'HIGH', fg: 'var(--watch-red-deep)', bg: 'var(--watch-red-tint)', border: 'var(--watch-red)' },
+    { key: 'MODERATE', fg: 'var(--watch-orange-deep)', bg: 'var(--watch-orange-tint)', border: 'var(--watch-orange)' },
+    { key: 'LOW', fg: 'var(--slate-teal)', bg: 'var(--slate-teal-tint)', border: 'var(--slate-teal)' },
+  ];
+
   return (
-    <div style={S.scrollWrap}>
-      <div style={S.container}>
-        <header>
-          <h2 style={{ margin:0, fontSize:'1.35rem', fontWeight:700, color:'var(--text-primary)' }}>Route weather analyzer</h2>
-          <p style={{ margin:'4px 0 0', fontSize:'0.85rem', color:'var(--text-muted)' }}>Check conditions and risk along a journey, point by point.</p>
-        </header>
+    <div style={S.card}>
+      <header>
+        <h2 style={P.h2}>Route weather analyzer</h2>
+        <p style={{ margin: '4px 0 0', fontSize: '13px', color: 'var(--muted)' }}>Check conditions and risk along a journey, point by point.</p>
+      </header>
 
-        <form onSubmit={handleSubmit} style={{ ...S.card, display:'flex', flexDirection:'column', gap:'14px' }}>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:'14px' }}>
-            {(['origin','destination'] as const).map(field => (
-              <div key={field} style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
-                <label style={S.label}>{field.charAt(0).toUpperCase()+field.slice(1)}</label>
-                <input style={S.input} type="text" name={field} value={form[field]}
-                  onChange={e => setForm({...form, [field]:e.target.value})} required
-                  placeholder={field==='origin' ? 'e.g. Delhi' : 'e.g. Agra'} />
-              </div>
-            ))}
-            <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
-              <label style={S.label}>Departure time</label>
-              <input style={S.input} type="time" name="departure_time" value={form.departure_time}
-                onChange={e => setForm({...form, departure_time:e.target.value})} required />
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: '14px' }}>
+          {(['origin', 'destination'] as const).map(field => (
+            <div key={field} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={S.label}>{field.charAt(0).toUpperCase() + field.slice(1)}</label>
+              <input style={S.input} type="text" name={field} value={form[field]}
+                onChange={e => setForm({ ...form, [field]: e.target.value })} required
+                placeholder={field === 'origin' ? 'e.g. Delhi' : 'e.g. Agra'} />
             </div>
+          ))}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <label style={S.label}>Departure time</label>
+            <input style={S.input} type="time" name="departure_time" value={form.departure_time}
+              onChange={e => setForm({ ...form, departure_time: e.target.value })} required />
           </div>
-          <button type="submit" disabled={loading} style={S.btn}>{loading ? 'Analyzing route…' : 'Analyze route'}</button>
-        </form>
+        </div>
+        <button type="submit" disabled={loading} style={S.btn}>{loading ? 'Analyzing route…' : 'Analyze route'}</button>
+      </form>
 
-        {err && <div style={S.error}>{err}</div>}
+      {err && <div style={S.error}>{err}</div>}
 
-        {resp && (
-          <div style={{ display:'flex', flexDirection:'column', gap:'18px' }}>
-            {resp.message && <div style={S.successBanner}>{resp.message}</div>}
+      {resp && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {resp.message && <div style={S.successBanner}>{resp.message}</div>}
 
-            {resp.risk_summary && (
-              <div style={S.card}>
-                <h3 style={S.cardTitle}>Risk summary</h3>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:'10px' }}>
-                  {([['HIGH','#f0a08c','rgba(229,101,74,0.3)'],['MODERATE','#f0cf8f','rgba(224,166,63,0.3)'],['LOW','#67e8f9','rgba(0,229,255,0.3)']] as const).map(([key,color,bc]) => (
-                    <div key={key} style={{ display:'flex', flexDirection:'column', alignItems:'center', padding:'14px', borderRadius:'8px', background:'rgba(5,11,18,0.8)', border:`1px solid ${bc}` }}>
-                      <span style={{ fontSize:'1.6rem', fontWeight:700, color }}>{(resp.risk_summary as any)[key] ?? 0}</span>
-                      <span style={{ fontSize:'0.7rem', color:'var(--text-muted)', marginTop:'4px' }}>{key.charAt(0)+key.slice(1).toLowerCase()}-risk waypoints</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {resp.weather_data && (
-              <div style={S.card}>
-                <h3 style={S.cardTitle}>Waypoint forecasts</h3>
-                {Array.isArray(resp.weather_data) ? (
-                  <div style={S.tableWrap}>
-                    <table style={S.table}>
-                      <thead><tr>
-                        {['#','Point','Condition','Temp','Risk','Details'].map(h => <th key={h} style={S.th}>{h}</th>)}
-                      </tr></thead>
-                      <tbody>
-                        {resp.weather_data.map((item: WeatherPoint, i: number) => {
-                          const name   = item.location || item.point || item.name || `Point ${i+1}`;
-                          const cond   = item.weather || item.condition || item.sky || '—';
-                          const temp   = (item.temp ?? item.temperature) !== undefined ? `${item.temp ?? item.temperature}°C` : '—';
-                          const risk   = item.risk || item.risk_level || 'NORMAL';
-                          const detail = item.description || item.notes || item.summary ||
-                            Object.entries(item).filter(([k]) => !['location','point','weather','condition','temp','temperature','risk','risk_level'].includes(k)).map(([k,v]) => `${k}: ${v}`).join(', ');
-                          return (
-                            <tr key={i} style={S.tr}>
-                              <td style={S.tdIndex}>{i+1}</td>
-                              <td style={S.tdBold}>{name}</td>
-                              <td style={S.td}>{cond}</td>
-                              <td style={S.td}>{temp}</td>
-                              <td style={S.td}><span style={{...S.badge,...riskStyle(risk)}}>{risk.toUpperCase()}</span></td>
-                              <td style={S.tdDesc}>{detail || '—'}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+          {resp.risk_summary && (
+            <div style={S.card}>
+              <h3 style={S.cardTitle}>Risk summary</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '10px' }}>
+                {riskBoxes.map(({ key, fg, bg, border }) => (
+                  <div key={key} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '14px', borderRadius: 'var(--radius-card)', background: bg, border: `1px solid ${border}` }}>
+                    <span style={{ fontSize: '1.6rem', fontWeight: 700, color: fg, fontVariantNumeric: 'tabular-nums' }}>{(resp.risk_summary as any)[key] ?? 0}</span>
+                    <span style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }}>{key.charAt(0) + key.slice(1).toLowerCase()}-risk waypoints</span>
                   </div>
-                ) : (
-                  <pre style={S.jsonBlock}>{JSON.stringify(resp.weather_data, null, 2)}</pre>
-                )}
+                ))}
               </div>
-            )}
+            </div>
+          )}
 
-            {resp.index_html && (
-              <div style={S.card}>
-                <h3 style={S.cardTitle}>Route map</h3>
-                <div style={S.mapWrapper}>
-                  <iframe title="Route map" srcDoc={resp.index_html} style={S.iframe} />
+          {resp.weather_data && (
+            <div style={S.card}>
+              <h3 style={S.cardTitle}>Waypoint forecasts</h3>
+              {Array.isArray(resp.weather_data) ? (
+                <div style={S.tableWrap}>
+                  <table style={S.table}>
+                    <thead><tr>
+                      {['#', 'Point', 'Condition', 'Temp', 'Risk', 'Details'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {resp.weather_data.map((item: WeatherPoint, i: number) => {
+                        const name = item.location || item.point || item.name || `Point ${i + 1}`;
+                        const cond = item.weather || item.condition || item.sky || 'n/a';
+                        const temp = (item.temp ?? item.temperature) !== undefined ? `${item.temp ?? item.temperature}°C` : 'n/a';
+                        const risk = item.risk || item.risk_level || 'NORMAL';
+                        const detail = item.description || item.notes || item.summary ||
+                          Object.entries(item)
+                            .filter(([k]) => !['location', 'point', 'weather', 'condition', 'temp', 'temperature', 'risk', 'risk_level'].includes(k))
+                            .map(([k, v]) => `${k}: ${v}`).join(', ');
+                        return (
+                          <tr key={i} style={S.tr}>
+                            <td style={S.tdIndex}>{i + 1}</td>
+                            <td style={S.tdBold}>{name}</td>
+                            <td style={S.td}>{cond}</td>
+                            <td style={S.td}>{temp}</td>
+                            <td style={S.td}><span style={{ ...S.badge, ...riskStyle(risk) }}>{risk.toUpperCase()}</span></td>
+                            <td style={S.tdDesc}>{detail || 'n/a'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
+              ) : (
+                <pre style={S.jsonBlock}>{JSON.stringify(resp.weather_data, null, 2)}</pre>
+              )}
+            </div>
+          )}
+
+          {resp.index_html && (
+            <div style={S.card}>
+              <h3 style={S.cardTitle}>Route map</h3>
+              <div style={S.mapWrapper}>
+                <iframe title="Route map" srcDoc={resp.index_html} style={S.iframe} />
               </div>
-            )}
-          </div>
-        )}
-      </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -527,13 +432,16 @@ function RouteWeatherView() {
 // WeatherReportView (offline-capable)
 // ─────────────────────────────────────────────────────────────────────
 
-function WeatherReportView({ location }: { location: Coordinates | null }) {
+function WeatherReportView() {
+  const { location, setLocation } = useLocation();
   const [cityInput, setCityInput] = useState('');
-  const [record, setRecord] = useState<ForecastRecord|null>(loadCachedForecast);
+  const [record, setRecord] = useState<ForecastRecord | null>(() =>
+    loadCachedForecast(location.latitude, location.longitude),
+  );
   const [loading, setLoading] = useState(false);
-  const [banner, setBanner] = useState<{tone:'error'|'info';text:string}|null>(null);
+  const [banner, setBanner] = useState<{ tone: 'error' | 'info'; text: string } | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
-  const autoRef = useRef(false);
+  const lastKeyRef = useRef('');
 
   useEffect(() => {
     const on = () => setOnline(true), off = () => setOnline(false);
@@ -541,766 +449,701 @@ function WeatherReportView({ location }: { location: Coordinates | null }) {
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
   }, []);
 
+  // Follows the canonical location: show the per-location offline cache, or
+  // fetch the forecast for exactly these coordinates.
   useEffect(() => {
-    if (autoRef.current || record || !location) return;
-    autoRef.current = true;
+    const { latitude, longitude, name, source } = location;
+    const key = `${latitude},${longitude}`;
+    const cached = loadCachedForecast(latitude, longitude);
+    if (cached) {
+      setRecord(cached);
+      lastKeyRef.current = key;
+      return;
+    }
+    // Never keep another place's forecast on screen while this one loads.
+    if (lastKeyRef.current !== key) setRecord(null);
+    lastKeyRef.current = key;
+    let cancelled = false;
+    setLoading(true);
+    setBanner(null);
     (async () => {
-      setLoading(true);
       try {
-        const name = await reverseGeocodeForReport(location.latitude, location.longitude);
-        const r = await fetchForecastRecord({ latitude:location.latitude, longitude:location.longitude, name });
-        saveForecast(r); setRecord(r);
-      } catch { /* silent */ } finally { setLoading(false); }
+        const label = source !== 'default' && name ? name : await reverseGeocodeLabel(latitude, longitude);
+        const r = await fetchForecastRecord({ latitude, longitude, name: label });
+        if (!cancelled) { saveForecast(r, latitude, longitude); setRecord(r); }
+      } catch {
+        if (!cancelled) setBanner({ tone: 'error', text: 'Weather data unavailable for this location.' });
+      } finally { if (!cancelled) setLoading(false); }
     })();
-  }, [location, record]);
+    return () => { cancelled = true; };
+  }, [location]);
 
   const search = async (override?: string) => {
     const city = (override ?? cityInput).trim();
-    if (!city) { setBanner({tone:'error', text:'Enter a city.'}); return; }
+    if (!city) { setBanner({ tone: 'error', text: 'Enter a city.' }); return; }
     if (!online) {
-      if (record) setBanner({tone:'info', text:'Offline — showing cached forecast.'});
-      else setBanner({tone:'error', text:'Offline and no cached forecast.'});
+      if (record) setBanner({ tone: 'info', text: 'Offline. Showing cached forecast.' });
+      else setBanner({ tone: 'error', text: 'Offline and no cached forecast.' });
       return;
     }
     setLoading(true); setBanner(null);
     try {
       const place = await geocodeCity(city);
-      const r = await fetchForecastRecord(place);
-      saveForecast(r); setRecord(r);
+      // Search selects the canonical location: every location-aware feature
+      // (map, radar, warnings, chat context) now follows the searched city.
+      setLocation({ latitude: place.latitude, longitude: place.longitude, name: place.name, country: place.country, source: 'search' });
+      setCityInput('');
+      setLoading(false); // same-coords search won't re-trigger the location effect
     } catch (e: any) {
-      if (record) setBanner({tone:'info', text:`${e.message} Showing cached forecast.`});
-      else setBanner({tone:'error', text:e.message});
-    } finally { setLoading(false); }
+      if (record) setBanner({ tone: 'info', text: `${e.message} Showing cached forecast.` });
+      else setBanner({ tone: 'error', text: e.message });
+      setLoading(false);
+    }
   };
 
-  return (
-    <div style={S.scrollWrap}>
-      <div style={S.container}>
-        <header>
-          <h2 style={{ margin:0, fontSize:'1.35rem', fontWeight:700, color:'var(--text-primary)' }}>Weather report</h2>
-          <p style={{ margin:'4px 0 0', fontSize:'0.85rem', color:'var(--text-muted)' }}>Search any city. Forecast cached for offline use.</p>
-        </header>
+  const fmtTime = (t: string) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const fmtDay = (t: string) => new Date(t).toLocaleDateString([], { weekday: 'long' });
 
-        <div style={{ display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap' }}>
-          <span style={{ padding:'6px 12px', borderRadius:'20px', fontSize:'0.78rem', fontWeight:600, border:'1px solid var(--glass-border)', color: online ? 'var(--accent-cyan)' : '#f87171' }}>
-            {online ? '🟢 Online' : '🔴 Offline'}
-          </span>
-          <input style={{...S.input, flex:1}} type="text" value={cityInput}
-            onChange={e => setCityInput(e.target.value)} onKeyDown={e => e.key==='Enter' && search()}
-            placeholder="Enter city e.g. Delhi" />
-          <button onClick={() => search()} disabled={loading}
-            style={{ padding:'10px 20px', background:'linear-gradient(120deg,#00c8ff 0%,#0078ff 100%)', color:'#050b12', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:700, fontSize:'0.88rem', whiteSpace:'nowrap' }}>
-            {loading ? 'Loading…' : 'Get weather'}
-          </button>
+  return (
+    <div style={S.card}>
+      <header>
+        <h2 style={P.h2}>Weather report</h2>
+        <p style={{ margin: '4px 0 0', fontSize: '13px', color: 'var(--muted)' }}>Search any city. Forecast is cached for offline use.</p>
+      </header>
+
+      <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '6px 12px', borderRadius: 'var(--radius-btn)', fontSize: '12px', fontWeight: 600, border: '1px solid var(--line)', color: online ? 'var(--slate-teal)' : 'var(--muted)' }}>
+          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: online ? 'var(--slate-teal)' : 'var(--muted)' }} />
+          {online ? 'Online' : 'Offline'}
+        </span>
+        <input style={{ ...S.input, flex: 1, minWidth: '180px' }} type="text" value={cityInput}
+          onChange={e => setCityInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && search()}
+          placeholder="Enter city, e.g. Delhi" />
+        <button onClick={() => search()} disabled={loading}
+          style={S.btn}>
+          {loading ? 'Loading…' : 'Get weather'}
+        </button>
+      </div>
+
+      {banner && <div style={banner.tone === 'error' ? S.error : S.successBanner}>{banner.text}</div>}
+
+      {!record && !loading && (
+        <div style={S.card}><p style={{ margin: 0, color: 'var(--muted)', fontSize: '13px' }}>Search a city to load a forecast.</p></div>
+      )}
+
+      {record && (<>
+        <div style={S.card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '10px' }}>
+            <div>
+              <h3 style={{ ...S.cardTitle, marginBottom: 2 }}>{record.location.name}{record.location.country ? `, ${record.location.country}` : ''}</h3>
+              <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>Updated {new Date(record.savedAt).toLocaleString()}</p>
+            </div>
+            <div style={{ fontSize: '2.2rem', fontWeight: 800, color: 'var(--slate-teal)', fontVariantNumeric: 'tabular-nums' }}>{Math.round(record.hourly24h.temperature[0])}°C</div>
+          </div>
+          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '13px', color: 'var(--ink)' }}>
+            <span>{wmoDesc(record.hourly24h.weatherCode[0])}</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}><Droplets size={14} style={{ color: 'var(--slate-teal)' }} /> {record.hourly24h.humidity[0]}%</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}><Wind size={14} style={{ color: 'var(--slate-teal)' }} /> {record.hourly24h.wind[0]} km/h</span>
+          </div>
         </div>
 
-        {banner && <div style={banner.tone==='error' ? S.error : S.successBanner}>{banner.text}</div>}
-
-        {!record && !loading && (
-          <div style={S.card}><p style={{ margin:0, color:'var(--text-muted)', fontSize:'0.88rem' }}>Search a city to load forecast.</p></div>
-        )}
-
-        {record && (<>
-          <div style={S.card}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:'10px' }}>
-              <div>
-                <h3 style={{ ...S.cardTitle, marginBottom:'2px' }}>{record.location.name}{record.location.country ? `, ${record.location.country}` : ''}</h3>
-                <p style={{ margin:0, fontSize:'0.78rem', color:'var(--text-muted)' }}>Last updated: {new Date(record.savedAt).toLocaleString()}</p>
+        <div style={S.card}>
+          <h3 style={S.cardTitle}>24-hour forecast</h3>
+          <div style={{ display: 'flex', gap: '10px', overflowX: 'auto', paddingBottom: '4px' }}>
+            {record.hourly24h.time.map((t, i) => (
+              <div key={t} style={{ flex: '0 0 auto', minWidth: '108px', padding: '12px', borderRadius: 'var(--radius-card)', background: 'var(--mist)', border: '1px solid var(--line)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--slate-teal)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{fmtTime(t)}</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--ink)', fontVariantNumeric: 'tabular-nums' }}>{Math.round(record.hourly24h.temperature[i])}°C</div>
+                <div style={{ fontSize: '11px', color: 'var(--muted)' }}>{wmoDesc(record.hourly24h.weatherCode[i])}</div>
+                <div style={{ fontSize: '11px', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: '4px' }}><Droplets size={12} /> {record.hourly24h.humidity[i]}%</div>
+                <div style={{ fontSize: '11px', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: '4px' }}><CloudRain size={12} /> {record.hourly24h.precipitationProbability[i]}%</div>
+                <div style={{ fontSize: '11px', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: '4px' }}><Wind size={12} /> {record.hourly24h.wind[i]} km/h</div>
               </div>
-              <div style={{ fontSize:'2.2rem', fontWeight:800, color:'var(--accent-cyan)' }}>{Math.round(record.hourly24h.temperature[0])}°C</div>
-            </div>
-            <div style={{ display:'flex', gap:'16px', flexWrap:'wrap', marginTop:'12px', fontSize:'0.85rem', color:'var(--text-secondary)' }}>
-              <span>{wmoDesc(record.hourly24h.weatherCode[0])}</span>
-              <span>💧 {record.hourly24h.humidity[0]}%</span>
-              <span>💨 {record.hourly24h.wind[0]} km/h</span>
-            </div>
+            ))}
           </div>
+        </div>
 
-          <div style={S.card}>
-            <h3 style={S.cardTitle}>24-hour forecast</h3>
-            <div style={{ display:'flex', gap:'10px', overflowX:'auto', paddingBottom:'4px' }}>
-              {record.hourly24h.time.map((t,i) => (
-                <div key={t} style={{ flex:'0 0 auto', minWidth:'108px', padding:'12px', borderRadius:'10px', background:'rgba(5,11,18,0.8)', border:'1px solid rgba(0,229,255,0.1)', display:'flex', flexDirection:'column', gap:'4px' }}>
-                  <div style={{ fontSize:'0.78rem', color:'var(--accent-cyan)', fontWeight:600 }}>{new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}</div>
-                  <div style={{ fontSize:'1.1rem', fontWeight:700, color:'var(--text-primary)' }}>{Math.round(record.hourly24h.temperature[i])}°C</div>
-                  <div style={{ fontSize:'0.75rem', color:'var(--text-secondary)' }}>{wmoDesc(record.hourly24h.weatherCode[i])}</div>
-                  <div style={{ fontSize:'0.7rem', color:'var(--text-muted)' }}>💧 {record.hourly24h.humidity[i]}%</div>
-                  <div style={{ fontSize:'0.7rem', color:'var(--text-muted)' }}>🌧️ {record.hourly24h.precipitationProbability[i]}%</div>
-                  <div style={{ fontSize:'0.7rem', color:'var(--text-muted)' }}>💨 {record.hourly24h.wind[i]} km/h</div>
-                </div>
-              ))}
-            </div>
+        <div style={S.card}>
+          <h3 style={S.cardTitle}>7-day forecast</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '10px' }}>
+            {record.daily7days.time.map((t, i) => (
+              <div key={t} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '14px', borderRadius: 'var(--radius-card)', background: 'var(--mist)', border: '1px solid var(--line)' }}>
+                <strong style={{ color: 'var(--ink)', fontSize: '13px' }}>{fmtDay(t)}</strong>
+                <span style={{ fontSize: '12px', color: 'var(--muted)' }}>{wmoDesc(record.daily7days.weatherCode[i])}</span>
+                <span style={{ fontSize: '12px', color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: '4px' }}><Thermometer size={12} style={{ color: 'var(--slate-teal)' }} /> {Math.round(record.daily7days.maxTemperature[i])}° / {Math.round(record.daily7days.minTemperature[i])}°</span>
+                <span style={{ fontSize: '12px', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: '4px' }}><CloudRain size={12} /> {record.daily7days.precipitationProbability[i]}%</span>
+              </div>
+            ))}
           </div>
-
-          <div style={S.card}>
-            <h3 style={S.cardTitle}>7-day forecast</h3>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:'10px' }}>
-              {record.daily7days.time.map((t,i) => (
-                <div key={t} style={{ display:'flex', flexDirection:'column', gap:'4px', padding:'14px', borderRadius:'10px', background:'rgba(5,11,18,0.8)', border:'1px solid rgba(0,229,255,0.1)' }}>
-                  <strong style={{ color:'var(--text-primary)', fontSize:'0.82rem' }}>{new Date(t).toLocaleDateString([],{weekday:'long'})}</strong>
-                  <span style={{ fontSize:'0.8rem', color:'var(--text-secondary)' }}>{wmoDesc(record.daily7days.weatherCode[i])}</span>
-                  <span style={{ fontSize:'0.8rem', color:'var(--text-secondary)' }}>🌡️ {Math.round(record.daily7days.maxTemperature[i])}° / {Math.round(record.daily7days.minTemperature[i])}°</span>
-                  <span style={{ fontSize:'0.8rem', color:'var(--text-muted)' }}>🌧️ {record.daily7days.precipitationProbability[i]}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>)}
-      </div>
+        </div>
+      </>)}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// AIChatView — powered by Python ML backend (Ollama/LangChain)
-// ─────────────────────────────────────────────────────────────────────
-
-const AI_SUGGESTIONS = [
-  { title:"Today's weather", text:"What's the current weather at my location?" },
-  { title:"Rain forecast",   text:"Will it rain in the next 24 hours?" },
-  { title:"Heat advisory",   text:"Is there a heatwave warning for Delhi?" },
-  { title:"Crop advisory",   text:"Should farmers in Punjab irrigate tomorrow?" },
-];
-
-function AIChatView({ location }: { location: Coordinates | null }) {
-  const [messages, setMessages] = useState<AiMessage[]>([]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior:'smooth' }); }, [messages, loading]);
-  useEffect(() => { textareaRef.current?.focus(); }, []);
-
-  const send = async (override?: string) => {
-    const prompt = (override ?? input).trim();
-    if (!prompt || loading) return;
-    setMessages(p => [...p, { role:'user', content:prompt }]);
-    setInput(''); setLoading(true);
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
-    try {
-      const res = await fetch(ML_AGENT_ENDPOINT, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          prompt,
-          location: location ? { latitude:location.latitude, longitude:location.longitude, accuracy:location.accuracy } : null,
-        }),
-      });
-      if (!res.ok) throw new Error(`Status ${res.status}`);
-      const d = await res.json();
-      setMessages(p => [...p, { role:'assistant', content:d.message }]);
-    } catch {
-      setMessages(p => [...p, { role:'assistant', content:"⚠️ The AI service is temporarily unavailable. Please try again." }]);
-    } finally { setLoading(false); }
-  };
-
-  const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-  };
-
-  return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100%', width:'100%', overflow:'hidden' }}>
-      {/* Chat body */}
-      <div style={{ flex:1, overflowY:'auto', padding:'24px 20px 12px' }}>
-        <div style={{ maxWidth:'860px', margin:'0 auto' }}>
-          {messages.length === 0 && (
-            <div style={{ paddingTop:'6vh' }}>
-              <div style={{ width:'44px', height:'44px', borderRadius:'12px', background:'var(--accent-cyan-dim)', border:'1px solid var(--accent-cyan)', display:'flex', alignItems:'center', justifyContent:'center', marginBottom:'20px' }}>
-                <Cloud size={22} style={{ color:'var(--accent-cyan)' }} />
-              </div>
-              <h2 style={{ margin:'0 0 24px', fontSize:'clamp(20px,4vw,28px)', fontWeight:700, color:'var(--text-primary)', letterSpacing:'-0.4px', lineHeight:1.25 }}>
-                Where would you like weather updates for today?
-              </h2>
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:'10px' }}>
-                {AI_SUGGESTIONS.map((s,i) => (
-                  <button key={i} onClick={() => send(s.text)} style={{ display:'flex', flexDirection:'column', justifyContent:'space-between', gap:'12px', minHeight:'88px', padding:'14px', textAlign:'left', background:'var(--glass-bg)', borderRadius:'12px', border:'1px solid var(--glass-border)', cursor:'pointer', transition:'border-color 0.15s' }}>
-                    <p style={{ margin:0, fontSize:'13px', fontWeight:500, color:'var(--text-primary)', lineHeight:1.4 }}>{s.text}</p>
-                    <span style={{ fontSize:'11px', color:'var(--text-muted)' }}>{s.title}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {messages.length > 0 && (
-            <div style={{ display:'flex', flexDirection:'column', gap:'18px', paddingBottom:'8px' }}>
-              {messages.map((m,i) => (
-                <div key={i} style={{ display:'flex', gap:'10px', justifyContent:m.role==='user'?'flex-end':'flex-start', alignItems:'flex-start' }}>
-                  {m.role==='assistant' && (
-                    <div style={{ width:'28px', height:'28px', borderRadius:'50%', background:'var(--glass-bg-strong)', border:'1px solid var(--glass-border)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, color:'var(--accent-cyan)' }}>
-                      <Cloud size={14} />
-                    </div>
-                  )}
-                  <div style={{ maxWidth:'min(78%,720px)' }}>
-                    {m.role==='user' ? (
-                      <div style={{ background:'var(--glass-bg-strong)', border:'1px solid var(--glass-border)', color:'var(--text-primary)', padding:'10px 15px', borderRadius:'16px', borderTopRightRadius:'4px', fontSize:'14px', lineHeight:1.55 }}>
-                        <p style={{ margin:0, whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{m.content}</p>
-                      </div>
-                    ) : (
-                      <div style={{ background:'var(--glass-bg)', border:'1px solid var(--glass-border)', padding:'12px 15px', borderRadius:'16px', borderTopLeftRadius:'4px', color:'var(--text-primary)', fontSize:'14px', lineHeight:1.65 }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                      </div>
-                    )}
-                  </div>
-                  {m.role==='user' && (
-                    <div style={{ width:'28px', height:'28px', borderRadius:'50%', background:'var(--glass-bg-strong)', color:'var(--text-secondary)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'11px', fontWeight:600, flexShrink:0 }}>U</div>
-                  )}
-                </div>
-              ))}
-              {loading && (
-                <div style={{ display:'flex', gap:'10px', alignItems:'center' }}>
-                  <div style={{ width:'28px', height:'28px', borderRadius:'50%', background:'var(--glass-bg-strong)', border:'1px solid var(--glass-border)', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--accent-cyan)' }}>
-                    <Cloud size={14} />
-                  </div>
-                  <div style={{ width:'110px', height:'11px', borderRadius:'6px', background:'linear-gradient(90deg,var(--glass-bg) 25%,var(--glass-bg-strong) 50%,var(--glass-bg) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.4s infinite' }} />
-                </div>
-              )}
-              <div ref={endRef} />
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Input */}
-      <div style={{ padding:'10px 20px 16px', maxWidth:'860px', width:'100%', margin:'0 auto', boxSizing:'border-box', flexShrink:0 }}>
-        <div style={{ borderRadius:'24px', padding:'1px', background:'var(--glass-border)', transition:'background 0.2s' }}>
-          <div style={{ display:'flex', alignItems:'flex-end', background:'var(--glass-bg)', borderRadius:'23px', padding:'6px 6px 6px 18px' }}>
-            <textarea ref={textareaRef} value={input} onChange={e => { setInput(e.target.value); const t=e.target; t.style.height='auto'; t.style.height=`${Math.min(t.scrollHeight,120)}px`; }}
-              onKeyDown={handleKey} disabled={loading} rows={1} placeholder="Ask WeatherGPT (AI-powered)…"
-              style={{ width:'100%', background:'transparent', border:'none', outline:'none', padding:'9px 0', fontSize:'16px', color:'var(--text-primary)', resize:'none', maxHeight:'120px', fontFamily:'inherit', lineHeight:1.4 }} />
-            <button onClick={() => send()} disabled={!input.trim()||loading}
-              style={{ width:'34px', height:'34px', borderRadius:'50%', background: (!input.trim()||loading) ? 'var(--glass-bg-strong)' : 'linear-gradient(120deg,var(--accent-cyan) 0%,var(--accent-blue) 100%)', color: (!input.trim()||loading) ? 'var(--text-muted)' : '#050b12', border:'none', display:'flex', alignItems:'center', justifyContent:'center', cursor: (!input.trim()||loading) ? 'not-allowed' : 'pointer', flexShrink:0 }}>
-              <Send size={14} />
-            </button>
-          </div>
-        </div>
-        <p style={{ fontSize:'10.5px', textAlign:'center', color:'var(--text-muted)', margin:'8px 0 0' }}>
-          Powered by OpenRouter + LangChain · answers are grounded in live weather data
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Root App component
+// Root App component — chat-first layout
 // ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  // ── Java-backend chat / nav state ──
-  const [mobileChatOpen, setMobileChatOpen] = useState(false);
-  const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
-  const [activeNav, setActiveNav] = useState<NavPage>('aichat');
-  const [selectedLang, setSelectedLang] = useState('en');
-  const [currentCity, setCurrentCity] = useState('Delhi');
-  const [gpsCoords, setGpsCoords] = useState<Coordinates|null>(null);
-  const [gpsWatching, setGpsWatching] = useState(false);
-  const [gpsWatchId, setGpsWatchId] = useState<number|null>(null);
+  const { theme, toggleTheme } = useTheme();
 
-  // ── Java-backend data state ──
-  const [messages, setMessages] = useState<{id:string;role:MessageRole;content:string;voiceAnswer?:string}[]>([{
-    id:'1', role:'bot',
-    content:"👋 Hello! I'm **WeatherGPT**, your AI meteorological assistant aligned with MoES / IMD.\n\nAsk me about live forecasts, crop advisories, NWP models or climate trends!",
-  }]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [sectorLoading, setSectorLoading] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  // ── Navigation: chat is the primary view; rail/drawer hold the rest ──
+  const [activePage, setActivePage] = useState<NavPage | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // ── Chat language: feeds the header toggle AND the AI chat's
+  // placeholder/voice locale (the chat itself lives in AIChatWorkspace).
+  const [selectedLang, setSelectedLang] = useState<'en' | 'hi'>('en');
+  // One canonical selected location: the header pill, GPS, search, map taps
+  // and every data fetch all read/write this single state. The AI chat
+  // (AIChatWorkspace) consumes the same state and posts the current
+  // coordinates with every /agent request.
+  const { location, setLocation, locationKey } = useLocation();
+
+  // ── Java-backend data state (rail/drawer pages) ──
+  // Every data page carries explicit loading/error state so a failed request
+  // surfaces an error + Retry instead of leaving "Loading…" forever.
   const [forecastList, setForecastList] = useState<any[]>([]);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  const [forecastError, setForecastError] = useState<string | null>(null);
   const [nwpComparison, setNwpComparison] = useState<any>(null);
+  const [nwpLoading, setNwpLoading] = useState(false);
+  const [nwpError, setNwpError] = useState<string | null>(null);
   const [sectorAdvisory, setSectorAdvisory] = useState<any>(null);
-  const [activeSector, setActiveSector] = useState<'agriculture'|'aviation'|'marine'|'urban'>('agriculture');
+  const [activeSector, setActiveSector] = useState<'agriculture' | 'aviation' | 'marine' | 'urban'>('agriculture');
+  const [sectorLoading, setSectorLoading] = useState(false);
+  const [sectorError, setSectorError] = useState<string | null>(null);
   const [alertsList, setAlertsList] = useState<any[]>([]);
   const [climateInfo, setClimateInfo] = useState<any>(null);
-  const [isSpeakingId, setIsSpeakingId] = useState<string|null>(null);
+  const [climateLoading, setClimateLoading] = useState(false);
+  const [climateError, setClimateError] = useState<string | null>(null);
 
-  // ── ML-backend / location state ──
-  const [gpsLocation, setGpsLocation] = useState<Coordinates|null>(null);
-  const [locationStatus, setLocationStatus] = useState<LocationStatus>('pending');
+  // ── Geolocation feeds the one canonical location ──
+  // Auto-fill runs only when nothing has been chosen yet (default source), so
+  // a saved choice or a deep link is never silently overridden (§7).
+  const gpsToCanonical = useCallback((coords: { latitude: number; longitude: number }) => {
+    setLocation({ latitude: coords.latitude, longitude: coords.longitude, source: 'gps' });
+    void reverseGeocodeLabel(coords.latitude, coords.longitude).then((name) => {
+      if (name === 'Selected point') return;
+      // Only fill the name if the user hasn't already moved to another place.
+      setLocation((prev) => (prev.latitude === coords.latitude && prev.longitude === coords.longitude ? { name } : {}));
+    });
+  }, [setLocation]);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const activeLangObj = LANGUAGES.find(l => l.code===selectedLang) ?? LANGUAGES[0];
-
-  // ── Voice ──
-  const { status:sttStatus, isSupported:sttSupported, startListening, stopListening } = useVoiceInput({
-    lang: activeLangObj.speechLocale,
-    onTranscript: (text) => { if (text) setInput(text); },
-    onError: (err) => console.error('Voice error:', err),
-  });
-  const { speak, stop:stopSpeech, isSpeaking } = useVoiceOutput();
-
-  // ── GPS (for map/radar pages) ──
   const requestLocation = useCallback(() => {
-    if (!('geolocation' in navigator)) { setLocationStatus('unsupported'); return; }
-    setLocationStatus('pending');
+    if (!('geolocation' in navigator)) return;
+    if (location.source !== 'default') return;
     navigator.geolocation.getCurrentPosition(
-      p => { setGpsLocation({ latitude:p.coords.latitude, longitude:p.coords.longitude, accuracy:p.coords.accuracy }); setLocationStatus('granted'); },
-      () => { setGpsLocation(null); setLocationStatus('denied'); },
-      { enableHighAccuracy:false, timeout:8000, maximumAge:300000 }
+      p => gpsToCanonical({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
+      () => { /* denial or timeout: keep current location */ },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
     );
-  }, []);
+  }, [location.source, gpsToCanonical]);
 
-  useEffect(() => { requestLocation(); }, []);
+  useEffect(() => { requestLocation(); }, [requestLocation]);
 
-  // ── GPS watch (for header indicator) ──
-  const handleUseMyLocation = useCallback(() => {
-    if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
-    if (gpsWatchId !== null) {
-      navigator.geolocation.clearWatch(gpsWatchId); setGpsWatching(false); setGpsWatchId(null); return;
-    }
-    const id = navigator.geolocation.watchPosition(
-      p => {
-        const {latitude,longitude,accuracy} = p.coords;
-        setCurrentCity(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
-        setGpsCoords({latitude,longitude,accuracy:accuracy??0});
-        setGpsWatching(true);
-        setGpsLocation({latitude,longitude,accuracy:accuracy??undefined});
-      },
-      err => console.warn('GPS error:', err),
-      { enableHighAccuracy:true, timeout:8000, maximumAge:0 }
+  // Location pill: refresh the canonical location from device GPS.
+  const handleLocationClick = useCallback(() => {
+    if (!('geolocation' in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      p => gpsToCanonical({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
+      () => { /* location access denied: keep last known place */ },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
     );
-    setGpsWatchId(id); setGpsWatching(true);
-  }, [gpsWatchId]);
+  }, [gpsToCanonical]);
 
-  useEffect(() => () => { if (gpsWatchId!==null) navigator.geolocation.clearWatch(gpsWatchId); }, [gpsWatchId]);
-
-  // ── Scroll chat on new messages ──
+  // Location change: drop stale page data and any stale loading/error state
+  // so every page re-queries against the new coordinates (§23).
   useEffect(() => {
-    if (messages.length > 1 || isLoading) messagesEndRef.current?.scrollIntoView({behavior:'smooth'});
-  }, [messages, isLoading]);
+    setForecastList([]);
+    setForecastLoading(false);
+    setForecastError(null);
+    setNwpComparison(null);
+    setNwpLoading(false);
+    setNwpError(null);
+    setClimateInfo(null);
+    setClimateLoading(false);
+    setClimateError(null);
+    setSectorAdvisory(null);
+    setSectorLoading(false);
+    setSectorError(null);
+  }, [locationKey]);
 
-  // ── Fetch Java-backend data ──
+  // ── Data fetch for the rail/drawer pages ──
+  // Lazy: each page fetches when first shown. There is deliberately NO
+  // "already loaded" marker: a failed request must be retryable, and a
+  // location change must trigger a fresh request for the new place.
+  useEffect(() => {
+    if (!activePage) return;
+    const ctrl = new AbortController();
+    const { signal } = ctrl;
+    if (activePage === 'forecast') void fetchWeather(location.name, signal);
+    if (activePage === 'nwp') void fetchNwp(location.name, signal);
+    if (activePage === 'climate') void fetchClimate(location.name, signal);
+    if (activePage === 'sectors') void fetchSector(location.name, activeSector, signal);
+    return () => ctrl.abort();
+  }, [activePage, location.name, locationKey, activeSector]);
+
+  // Retry a failed page fetch with a fresh request (never blocked by stale
+  // state). The controller is abandoned on navigation, which is harmless.
+  const retryFetch = (kind: 'forecast' | 'nwp' | 'climate' | 'sector') => {
+    const ctrl = new AbortController();
+    const { signal } = ctrl;
+    if (kind === 'forecast') void fetchWeather(location.name, signal);
+    else if (kind === 'nwp') void fetchNwp(location.name, signal);
+    else if (kind === 'climate') void fetchClimate(location.name, signal);
+    else if (kind === 'sector') void fetchSector(location.name, activeSector, signal);
+  };
+
+  // Alerts are always fetched — the warning bulletin above the chat needs them.
   useEffect(() => {
     const ctrl = new AbortController();
-    (async () => {
-      try {
-        await fetchWeather(currentCity, ctrl.signal);
-        await fetchNwp(currentCity, ctrl.signal);
-        await fetchSector(currentCity, activeSector, ctrl.signal);
-        await fetchAlerts(currentCity, ctrl.signal);
-        await fetchClimate(currentCity, ctrl.signal);
-      } catch (e) { if (!(e instanceof Error && e.name==='AbortError')) console.warn('Initial load error:', e); }
-    })();
+    void fetchAlerts(location.name, ctrl.signal);
     return () => ctrl.abort();
-  }, [currentCity, activeSector]);
+  }, [location.name]);
 
-  const fetchWeather = async (city: string, signal?: AbortSignal) => {
+  const fetchWeather = async (city: string, signal: AbortSignal) => {
+    setForecastLoading(true);
+    setForecastError(null);
     try {
-      const f = await fetch(WEATHER_ENDPOINTS.FORECAST(city,7), {signal}); const fd = await f.json();
-      if (fd.success && fd.data?.days) setForecastList(fd.data.days);
-    } catch (e) { if (!(e instanceof Error && e.name==='AbortError')) console.warn('Weather error:', e); }
+      const url = WEATHER_ENDPOINTS.FORECAST(city, 7);
+      const f = await fetch(url, { signal });
+      if (!f.ok) throw new Error(await describeHttpError(f));
+      const fd = await f.json();
+      if (!fd?.success) throw new Error(fd?.message ?? 'Backend returned success:false');
+      if (!Array.isArray(fd.data?.days) || fd.data.days.length === 0) throw new Error('No forecast days returned');
+      setForecastList(fd.data.days);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('[Forecast] request failed:', e);
+      setForecastError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (!signal.aborted) setForecastLoading(false);
+    }
   };
-  const fetchNwp = async (city: string, signal?: AbortSignal) => {
-    try { const r=await fetch(WEATHER_ENDPOINTS.NWP(city),{signal}); const d=await r.json(); if(d.success&&d.data) setNwpComparison(d.data); }
-    catch(e){ if(!(e instanceof Error&&e.name==='AbortError')) console.warn('NWP error:',e); }
+  const fetchNwp = async (city: string, signal: AbortSignal) => {
+    setNwpLoading(true);
+    setNwpError(null);
+    try {
+      const url = WEATHER_ENDPOINTS.NWP(city);
+      const r = await fetch(url, { signal });
+      if (!r.ok) throw new Error(await describeHttpError(r));
+      const d = await r.json();
+      if (!d?.success) throw new Error(d?.message ?? 'Backend returned success:false');
+      const data = d?.data;
+      if (!data) throw new Error('Backend returned no data object');
+      if (!Array.isArray(data.models)) throw new Error('Unexpected response shape: models[] is missing');
+      setNwpComparison(data);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('[NWP] request failed:', e);
+      setNwpError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (!signal.aborted) setNwpLoading(false);
+    }
   };
-  const fetchSector = async (city: string, sector: string, signal?: AbortSignal) => {
+  const fetchSector = async (city: string, sector: string, signal: AbortSignal) => {
     setSectorLoading(true);
-    try { const r=await fetch(ADVISORIES_ENDPOINT(city,sector),{signal}); const d=await r.json(); if(d.success&&d.data) setSectorAdvisory(d.data); }
-    catch(e){ if(!(e instanceof Error&&e.name==='AbortError')) console.warn('Sector error:',e); }
-    finally { setSectorLoading(false); }
-  };
-  const fetchAlerts = async (city: string, signal?: AbortSignal) => {
-    try { const r=await fetch(ALERTS_ENDPOINT(city),{signal}); const d=await r.json(); if(d.success&&d.data?.alerts) setAlertsList(d.data.alerts); }
-    catch(e){ if(!(e instanceof Error&&e.name==='AbortError')) console.warn('Alerts error:',e); }
-  };
-  const fetchClimate = async (city: string, signal?: AbortSignal) => {
-    try { const r=await fetch(CLIMATE_ENDPOINT(city),{signal}); const d=await r.json(); if(d.success&&d.data) setClimateInfo(d.data); }
-    catch(e){ if(!(e instanceof Error&&e.name==='AbortError')) console.warn('Climate error:',e); }
-  };
-
-  const toggleVoice = useCallback(() => {
-    if (sttStatus==='listening') { stopListening(); setVoiceEnabled(false); }
-    else { stopSpeech(); startListening(); setVoiceEnabled(true); }
-  }, [sttStatus, startListening, stopListening, stopSpeech]);
-
-  const handleSend = useCallback(async (customMsg?: string) => {
-    const text = (customMsg || input).trim();
-    if (!text || isLoading) return;
-    if (!customMsg) setInput('');
-    setIsLoading(true);
-    const userMsg = { id:Date.now().toString(), role:'user' as MessageRole, content:text };
-    setMessages(p => [...p, userMsg]);
+    setSectorError(null);
     try {
-      const res = await fetch(CHAT_ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ message:text, language:selectedLang, sector:activeSector, sessionId:'desktop-session' }) });
-      const d = await res.json();
-      if (d.success && d.data) {
-        const bot = { id:(Date.now()+1).toString(), role:'bot' as MessageRole, content:d.data.answer||'Query processed.', voiceAnswer:d.data.voiceAnswer||d.data.answer };
-        setMessages(p => [...p, bot]);
-        if (d.data.location?.name) setCurrentCity(d.data.location.name);
-        if (voiceEnabled && d.data.voiceAnswer) speak(d.data.voiceAnswer, activeLangObj.speechLocale);
-      } else {
-        setMessages(p => [...p, { id:(Date.now()+1).toString(), role:'bot', content:d.message||'Could not process query.' }]);
-      }
-    } catch {
-      setMessages(p => [...p, { id:(Date.now()+1).toString(), role:'bot', content:'⚠️ Unable to connect to backend.' }]);
-    } finally { setIsLoading(false); }
-  }, [input, isLoading, selectedLang, activeSector, voiceEnabled, activeLangObj, speak]);
-
-  const handleSpeakText = (msg: {id:string;content:string;voiceAnswer?:string}) => {
-    if (isSpeaking && isSpeakingId===msg.id) { stopSpeech(); setIsSpeakingId(null); }
-    else { stopSpeech(); speak((msg.voiceAnswer||msg.content).replace(/[*#`_~]/g,''), activeLangObj.speechLocale); setIsSpeakingId(msg.id); }
+      const r = await fetch(ADVISORIES_ENDPOINT(city, sector), { signal });
+      if (!r.ok) throw new Error(await describeHttpError(r));
+      const d = await r.json();
+      if (!d?.success) throw new Error(d?.message ?? 'Backend returned success:false');
+      if (!d?.data) throw new Error('Backend returned no data object');
+      setSectorAdvisory(d.data);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('[Sector] request failed:', e);
+      setSectorError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (!signal.aborted) setSectorLoading(false);
+    }
+  };
+  const fetchAlerts = async (city: string, signal: AbortSignal) => {
+    try {
+      const r = await fetch(ALERTS_ENDPOINT(city), { signal });
+      if (!r.ok) throw new Error(await describeHttpError(r));
+      const d = await r.json();
+      if (d?.success && Array.isArray(d.data?.alerts)) setAlertsList(d.data.alerts);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('[Alerts] request failed:', e);
+      // No blocking UI state: an absent warning bulletin is the safe default.
+    }
+  };
+  const fetchClimate = async (city: string, signal: AbortSignal) => {
+    setClimateLoading(true);
+    setClimateError(null);
+    try {
+      const url = CLIMATE_ENDPOINT(city);
+      const r = await fetch(url, { signal });
+      if (!r.ok) throw new Error(await describeHttpError(r));
+      const d = await r.json();
+      if (!d?.success) throw new Error(d?.message ?? 'Backend returned success:false');
+      if (!d?.data) throw new Error('Backend returned no data object');
+      setClimateInfo(d.data);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('[Climate] request failed:', e);
+      setClimateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (!signal.aborted) setClimateLoading(false);
+    }
   };
 
-  // ── Mobile ──
-  if (typeof window!=='undefined' && window.innerWidth<=768) return <MobileWeatherGPT />;
+  // ── Active IMD warning (bulletin overrides routine answers structurally) ──
+  const activeWarning = useMemo<ImdWarning | null>(() => {
+    if (IS_DEMO) return DEMO_WARNING;
+    if (!alertsList.length) return null;
+    const a = alertsList[0];
+    const text = a.description || a.warning || a.message || '';
+    if (!text) return null;
+    return {
+      district: `${location.name} district`,
+      severity: severityOf(a),
+      title: a.title || undefined,
+      text,
+      issuedAt: a.issuedAt ?? a.issueTime ?? a.issued ?? undefined,
+    };
+  }, [alertsList, location.name]);
 
-  // ── Pages that use the full-viewport layout (no chat column) ──
-  const FULLSCREEN_PAGES: NavPage[] = ['aichat','route','report','map','radar'];
-  const isFullscreen = FULLSCREEN_PAGES.includes(activeNav);
+  const handleNavigate = (page: NavPage) => {
+    setActivePage(page);
+    setDrawerOpen(false);
+  };
 
-  // ── Shared header nav items ──
-  const ALL_NAV: {id:NavPage;label:string;icon:React.ReactNode;group:'java'|'ml'}[] = [
-    { id:'forecast', label:'Forecast', icon:<BarChart3 size={20}/>, group:'java' },
-    { id:'nwp',      label:'NWP Models',   icon:<Cpu size={20}/>,         group:'java' },
-    { id:'sectors',  label:'Sectors',      icon:<Layers size={20}/>,      group:'java' },
-    { id:'alerts',   label:'Alerts',       icon:<Bell size={20}/>,        group:'java' },
-    { id:'climate',  label:'Climate',      icon:<TrendingUp size={20}/>,  group:'java' },
-    { id:'aichat',   label:'AI Chat',      icon:<Cloud size={20}/>,       group:'ml'   },
-    { id:'route',    label:'Route Weather',icon:<Wind size={20}/>,        group:'ml'   },
-    { id:'report',   label:'Weather Report',icon:<Droplets size={20}/>,   group:'ml'   },
-    { id:'map',      label:'Weather Map',  icon:<MapPin size={20}/>,      group:'ml'   },
-    { id:'radar',    label:'Radar',        icon:<Radar size={20}/>,       group:'ml'   },
+  const navigateHome = () => {
+    setActivePage(null);
+    setDrawerOpen(false);
+  };
+
+  // ── Render ──
+  const onChat = activePage === null;
+
+  const SECTOR_LIST: { id: 'agriculture' | 'aviation' | 'marine' | 'urban'; label: string; icon: typeof Sprout }[] = [
+    { id: 'agriculture', label: 'Agriculture', icon: Sprout },
+    { id: 'aviation', label: 'Aviation', icon: Plane },
+    { id: 'marine', label: 'Marine', icon: Anchor },
+    { id: 'urban', label: 'Smart City', icon: Building2 },
   ];
 
+  const climateMetrics = [
+    { label: 'Warming rate', value: `+${climateInfo?.warmingRatePerDecade}°C`, sub: 'per decade', icon: Flame },
+    { label: 'Baseline mean', value: `${climateInfo?.baselineMeanTemperature}°C`, sub: '30-year normal', icon: Thermometer },
+    { label: 'Annual rain', value: `${climateInfo?.baselineAnnualPrecipitation} mm`, sub: 'per year', icon: Droplets },
+  ] as const;
+
   return (
-    <div className="simple-weathergpt">
-      <div className="glass-orb glass-orb-1" aria-hidden="true" />
-      <div className="glass-orb glass-orb-2" aria-hidden="true" />
-      <div className="glass-orb glass-orb-3" aria-hidden="true" />
+    <div className="app">
+      <IconRail activePage={activePage} onNavigate={handleNavigate} onGoHome={navigateHome} />
 
-      {/* ── Sidebar ── */}
-      <aside className="sidebar">
-        <button className="sidebar-logo" title="WeatherGPT" aria-label="WeatherGPT">
-          <svg className="breeze-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <path d="M2 16C2 23.7268 8.2732 30 16 30C23.7268 30 30 23.7268 30 16C30 8.2732 23.7268 2 16 2C8.2732 2 2 8.2732 2 16V16" stroke="white" strokeOpacity="0.225" strokeWidth="2.2" strokeLinecap="round"/>
-            <path d="M9 13.5C11.5 12 14 12 16.5 13.5C19 15 21.5 15 24 13.5" stroke="white" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-            <path d="M8 17.5C10.5 16 13 16 15.5 17.5C18 19 20.5 19 23 17.5" stroke="white" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-            <path d="M10 21.5C12 20.5 14 20.5 16 21.5C18 22.5 20 22.5 22 21.5" stroke="white" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-          </svg>
-        </button>
+      <div className="main">
+        <AppHeader
+          locationName={location.name}
+          lang={selectedLang}
+          onLanguageChange={setSelectedLang}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onLocationClick={handleLocationClick}
+          drawerOpen={drawerOpen}
+          onToggleDrawer={() => setDrawerOpen(v => !v)}
+        />
 
-        <nav className="sidebar-nav">
-          {/* Java-backend pages */}
-          <div style={{ padding:'4px 8px 2px', fontSize:'9px', fontWeight:700, color:'var(--text-muted)', letterSpacing:'0.08em', textTransform:'uppercase' }}>Dashboard</div>
-          {ALL_NAV.filter(n => n.group==='java').map(n => (
-            <button key={n.id} className={`sidebar-item ${activeNav===n.id?'active':''}`} onClick={() => setActiveNav(n.id)} title={n.label} aria-label={n.label}>
-              {n.icon}
-            </button>
-          ))}
-          <div style={{ height:'1px', background:'var(--glass-border)', margin:'8px 10px' }} />
-          {/* ML-backend pages */}
-          <div style={{ padding:'4px 8px 2px', fontSize:'9px', fontWeight:700, color:'var(--text-muted)', letterSpacing:'0.08em', textTransform:'uppercase' }}>AI / Maps</div>
-          {ALL_NAV.filter(n => n.group==='ml').map(n => (
-            <button key={n.id} className={`sidebar-item ${activeNav===n.id?'active':''}`} onClick={() => setActiveNav(n.id)} title={n.label} aria-label={n.label}>
-              {n.icon}
-            </button>
-          ))}
-        </nav>
-      </aside>
+        <WarningBulletin warning={activeWarning} />
 
-      {/* ── Main ── */}
-      <main className="main-content">
-        {/* Header */}
-        <header className="simple-header">
-          <div className="header-brand">
-            <div className="header-logo-icon">
-              <svg width="22" height="22" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M2 16C2 23.7268 8.2732 30 16 30C23.7268 30 30 23.7268 30 16C30 8.2732 23.7268 2 16 2C8.2732 2 2 8.2732 2 16V16" stroke="currentColor" strokeOpacity="0.225" strokeWidth="2.2" strokeLinecap="round"/>
-                <path d="M9 13.5C11.5 12 14 12 16.5 13.5C19 15 21.5 15 24 13.5" stroke="currentColor" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-                <path d="M8 17.5C10.5 16 13 16 15.5 17.5C18 19 20.5 19 23 17.5" stroke="currentColor" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-                <path d="M10 21.5C12 20.5 14 20.5 16 21.5C18 22.5 20 22.5 22 21.5" stroke="currentColor" strokeOpacity="0.9" strokeWidth="2.2" strokeLinecap="round"/>
-              </svg>
-            </div>
-            <div className="header-title-group">
-              <h1>WeatherGPT</h1>
-              <p className="header-subtitle">AI-Powered Meteorological Intelligence</p>
-            </div>
-            <div style={{ display:'flex', alignItems:'center', gap:'8px', marginTop:'4px' }}>
-              <span style={{ fontSize:'10px', color:'var(--text-secondary)', background:'var(--glass-bg)', padding:'2px 8px', borderRadius:'12px', border:'1px solid var(--glass-border)' }}>
-                {gpsCoords ? `📍 ${gpsCoords.latitude.toFixed(2)}, ${gpsCoords.longitude.toFixed(2)}` : locationStatus === 'denied' ? '📍 Location blocked' : locationStatus === 'unsupported' ? '📍 No GPS' : '📍 Set location'}
-              </span>
-              <button onClick={requestLocation} style={{ fontSize:'10px', padding:'2px 6px', borderRadius:'12px', border:'1px solid var(--accent-cyan)', background:'var(--accent-cyan-dim)', color:'var(--accent-cyan)', cursor:'pointer' }}>
-                Set
-              </button>
-            </div>
-          </div>
+        {onChat ? (
+          <AIChatWorkspace lang={selectedLang} />
+        ) : (
+          <main className="page-view" aria-label={NAV_LABELS[activePage] ?? activePage}>
+            <div className="page-view-inner">
+              {activePage === 'forecast' && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>7-Day Forecast for {location.name}</h2>
+                  </header>
+                  {forecastError && forecastList.length === 0 ? (
+                    <div style={S.error} role="alert">
+                      <p style={{ margin: 0, fontWeight: 600 }}>Unable to load the forecast.</p>
+                      <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>{forecastError}</p>
+                      <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('forecast')}>Retry</button>
+                    </div>
+                  ) : forecastList.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--muted)' }} aria-busy={forecastLoading}>Loading forecast…</div>
+                  ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(110px,1fr))', gap: '10px' }}>
+                    {forecastList.map((day: any, i: number) => (
+                      <div key={i} style={P.metaCard}>
+                        <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--slate-teal)' }}>{i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : day.date}</div>
+                        <div style={{ fontSize: '17px', fontWeight: 800, margin: '6px 0', fontVariantNumeric: 'tabular-nums' }}>{Math.round(day.tempMax)}° / {Math.round(day.tempMin)}°</div>
+                        <div style={{ fontSize: '11.5px', color: 'var(--muted)' }}>{day.weatherDescription}</div>
+                        <div style={{ fontSize: '11.5px', color: 'var(--ink)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          <CloudRain size={12} style={{ color: 'var(--slate-teal)' }} /> {day.precipitationProbabilityMax}%
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  )}
+                </div>
+              )}
 
-          <nav className="header-nav">
-            {ALL_NAV.map(n => (
-              <button key={n.id} className={`header-nav-item ${activeNav===n.id?'active':''}`} onClick={() => setActiveNav(n.id)}>{n.label}</button>
-            ))}
-          </nav>
+              {activePage === 'nwp' && nwpComparison && nwpComparison.models.length > 0 && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                  </header>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <span style={{ ...S.badge, background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' }}>
+                      Consensus: {nwpComparison.consensus?.consensusScorePercentage}% ({nwpComparison.consensus?.confidenceLevel})
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '13px', color: 'var(--muted)', margin: 0 }}>{nwpComparison.consensus?.synopticSummary}</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: '10px' }}>
+                    {nwpComparison.models?.map((m: any, i: number) => (
+                      <div key={i} style={P.metaCard}>
+                        <strong style={{ color: 'var(--slate-teal)' }}>{m.modelName}</strong> <span style={{ color: 'var(--muted)', fontSize: '12px' }}>({m.resolution})</span>
+                        <div style={{ fontSize: '12.5px', margin: '4px 0', color: 'var(--ink)' }}>
+                          Max <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.maxTemp}°C</b> · Min <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.minTemp}°C</b>
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Rain: {m.totalPrecipitation} mm · Wind: {m.maxWindSpeed} km/h</div>
+                        <div style={{ fontSize: '11.5px', color: 'var(--slate-teal)', marginTop: '4px' }}>{m.synopticCondition}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-          <div className="header-actions">
-            <button className="header-action-btn" onClick={handleUseMyLocation} title="Use My Location" aria-label="Use My Location">
-              {gpsWatching && gpsCoords ? (
-                <span style={{ display:'flex', alignItems:'center', gap:'4px', fontSize:'11px' }}>
-                  <span style={{ color:gpsCoords.accuracy!<=50?'#10b981':'#f59e0b' }}>●</span>
-                  <MapPin size={13} />
-                  <span style={{ color:'#94a3b8' }}>GPS {Math.round(gpsCoords.accuracy!)}m</span>
-                </span>
-              ) : (<MapPin size={16}/>)}
-            </button>
-            {!isFullscreen && (
-              <>
-                <button className={`header-action-btn voice-btn ${sttStatus==='listening'?'active':''}`} onClick={toggleVoice} disabled={!sttSupported} title="Voice Query" aria-label="Voice Query">
-                  <Mic size={16}/>
-                  <span className="voice-label">{sttStatus==='listening'?'Listening…':'Voice'}</span>
-                </button>
-                <button className="header-action-btn chat-btn" onClick={() => setChatDrawerOpen(!chatDrawerOpen)} title="Open Chat" aria-label="Open Chat">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                  <span className="chat-label">Chat</span>
-                </button>
-              </>
-            )}
-            {isFullscreen && locationStatus !== 'pending' && (
-              <button className={`header-action-btn ${locationStatus==='granted'?'active':''}`} onClick={requestLocation} title="Location status" style={{ fontSize:'11px', gap:'4px' }}>
-                <MapPin size={14}/>
-                <span style={{ fontSize:'11px' }}>{locationStatus==='granted'?'GPS on':'GPS off'}</span>
-              </button>
-            )}
-          </div>
-        </header>
+              {activePage === 'nwp' && nwpComparison && nwpComparison.models.length === 0 && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                  </header>
+                  <p style={{ textAlign: 'center', padding: '24px', color: 'var(--muted)', margin: 0 }}>
+                    No NWP model data is currently available.
+                  </p>
+                </div>
+              )}
 
-        {/* ── Full-screen pages (AI / Maps) ── */}
-        {isFullscreen && (
-          <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden', minHeight:0 }}>
-            {activeNav==='aichat'  && <AIChatView   location={gpsLocation} />}
-            {activeNav==='route'   && <RouteWeatherView />}
-            {activeNav==='report'  && <WeatherReportView location={gpsLocation} />}
-            {activeNav==='map'     && <WeatherMapView    location={gpsLocation} />}
-            {activeNav==='radar'   && <InteractiveRadarView location={gpsLocation} />}
-          </div>
-        )}
+              {activePage === 'nwp' && nwpError && !nwpComparison && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                  </header>
+                  <div style={S.error} role="alert">
+                    <p style={{ margin: 0, fontWeight: 600 }}>Unable to load NWP models.</p>
+                    <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>The weather-model service did not return usable data ({nwpError}).</p>
+                    <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('nwp')}>Retry</button>
+                  </div>
+                </div>
+              )}
 
-        {/* ── Dashboard pages (Java backend) ── */}
-        {!isFullscreen && (<>
-          <div className="dashboard-view-container">
+              {activePage === 'nwp' && !nwpComparison && !nwpError && (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }} aria-busy={nwpLoading}>Loading NWP models…</div>
+              )}
 
-            {activeNav==='forecast' && (
-              <div className="forecast-panel-desktop">
-                <h3 style={{ margin:'0 0 12px', fontSize:'16px' }}>📅 7-Day Forecast — {currentCity}</h3>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(110px,1fr))', gap:'10px', overflowX:'auto' }}>
-                  {forecastList.map((day,i) => (
-                    <div key={i} className="forecast-day-glass">
-                      <div style={{ fontSize:'12px', fontWeight:700, color:'#38bdf8' }}>{i===0?'Today':i===1?'Tomorrow':day.date}</div>
-                      <div style={{ fontSize:'16px', fontWeight:800, margin:'6px 0' }}>{Math.round(day.tempMax)}° / {Math.round(day.tempMin)}°</div>
-                      <div style={{ fontSize:'11px', color:'#cbd5e1' }}>{day.weatherDescription}</div>
-                      <div style={{ fontSize:'11px', color:'#67e8f9', marginTop:'4px' }}>🌧️ {day.precipitationProbabilityMax}%</div>
+              {activePage === 'sectors' && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>Sector advisories for {location.name}</h2>
+                  </header>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {SECTOR_LIST.map(({ id, label, icon: Icon }) => (
+                      <button key={id} type="button" onClick={() => setActiveSector(id)} aria-pressed={activeSector === id}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '7px',
+                          background: activeSector === id ? 'var(--slate-teal-tint)' : 'var(--paper)',
+                          color: activeSector === id ? 'var(--slate-teal)' : 'var(--muted)',
+                          border: `1px solid ${activeSector === id ? 'var(--slate-teal)' : 'var(--line)'}`,
+                          padding: '6px 14px', borderRadius: 'var(--radius-btn)', cursor: 'pointer',
+                          fontSize: '12.5px', fontWeight: 600, fontFamily: 'var(--font-ui)',
+                        }}>
+                        <Icon size={15} /> {label}
+                      </button>
+                    ))}
+                  </div>
+                  {sectorError && !sectorAdvisory ? (
+                    <div style={S.error} role="alert">
+                      <p style={{ margin: 0, fontWeight: 600 }}>Unable to load {activeSector} advisory.</p>
+                      <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>{sectorError}</p>
+                      <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('sector')}>Retry</button>
+                    </div>
+                  ) : sectorLoading ? (
+                    <div style={{ textAlign: 'center', padding: '20px', color: 'var(--muted)' }}>Loading {activeSector} advisory…</div>
+                  ) : (<>
+                    {activeSector === 'agriculture' && sectorAdvisory?.agriculture && (
+                      <div className="sector-cards" style={{ fontSize: '13px', lineHeight: '1.7' }}>
+                        {[
+                          { icon: Sprout, title: 'Sowing advice', text: sectorAdvisory.agriculture.sowingAdvisory, accent: 'var(--slate-teal)', border: 'var(--slate-teal)' },
+                          { icon: Droplets, title: 'Irrigation', text: sectorAdvisory.agriculture.irrigationRecommendation, accent: 'var(--slate-teal)', border: 'var(--slate-teal)' },
+                          { icon: SprayCan, title: 'Spraying window', text: sectorAdvisory.agriculture.sprayingWindow, accent: 'var(--brass)', border: 'var(--brass)' },
+                        ].map(({ icon: Icon, title, text, accent, border }) => (
+                          <div key={title} style={{ background: 'var(--mist)', border: `1px solid ${border}`, padding: '12px', borderRadius: 'var(--radius-card)' }}>
+                            <p style={{ margin: '0 0 4px', fontWeight: 600, color: accent, display: 'flex', alignItems: 'center', gap: '7px' }}>
+                              <Icon size={15} /> {title}
+                            </p>
+                            <p style={{ margin: 0, color: 'var(--ink)' }}>{text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {activeSector === 'aviation' && sectorAdvisory?.aviation && (
+                      <div className="sector-cards" style={{ fontSize: '13px', lineHeight: '1.7' }}>
+                        <div style={{ background: 'var(--mist)', border: '1px solid var(--line)', padding: '12px', borderRadius: 'var(--radius-card)' }}>
+                          <p style={{ margin: '0 0 4px', fontWeight: 600, color: 'var(--slate-teal)', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                            <Plane size={15} /> Flight category
+                          </p>
+                          <p style={{ margin: 0, color: 'var(--ink)', fontWeight: 700 }}>{sectorAdvisory.aviation.flightCategory}</p>
+                        </div>
+                        <div style={{ background: 'var(--mist)', border: '1px solid var(--line)', padding: '12px', borderRadius: 'var(--radius-card)' }}>
+                          <p style={{ margin: 0, color: 'var(--ink)', fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{sectorAdvisory.aviation.metarCode}</p>
+                        </div>
+                      </div>
+                    )}
+                    {activeSector === 'marine' && sectorAdvisory?.marine && (
+                      <div className="sector-cards" style={{ fontSize: '13px', lineHeight: '1.7' }}>
+                        <div style={{ background: 'var(--mist)', border: '1px solid var(--line)', padding: '12px', borderRadius: 'var(--radius-card)' }}>
+                          <p style={{ margin: '0 0 4px', fontWeight: 600, color: 'var(--slate-teal)', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                            <Anchor size={15} /> Fishermen directive
+                          </p>
+                          <p style={{ margin: 0, color: 'var(--ink)' }}>{sectorAdvisory.marine.fishermenAction}</p>
+                        </div>
+                      </div>
+                    )}
+                    {activeSector === 'urban' && sectorAdvisory?.smartCity && (
+                      <div className="sector-cards" style={{ fontSize: '13px', lineHeight: '1.7' }}>
+                        <div style={{ background: 'var(--mist)', border: '1px solid var(--line)', padding: '12px', borderRadius: 'var(--radius-card)' }}>
+                          <p style={{ margin: '0 0 4px', fontWeight: 600, color: 'var(--slate-teal)', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                            <Waves size={15} /> Flood risk
+                          </p>
+                          <p style={{ margin: 0, color: 'var(--ink)' }}>{sectorAdvisory.smartCity.waterloggingFloodRisk}</p>
+                        </div>
+                      </div>
+                    )}
+                  </>)}
+                </div>
+              )}
+
+              {activePage === 'alerts' && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>IMD colour-coded early warnings for {location.name}</h2>
+                  </header>
+                  {alertsList.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--watch-green)' }}>
+                      <CheckCircle size={36} style={{ margin: '0 auto 8px' }} />
+                      <p style={{ margin: 0 }}><strong>IMD Green: normal weather conditions</strong></p>
+                      <span style={{ fontSize: '12px', color: 'var(--muted)' }}>No severe weather warnings for {location.name}.</span>
+                    </div>
+                  ) : alertsList.map((a: any) => (
+                    <div key={a.id} style={{ background: 'var(--mist)', borderLeft: `4px solid ${tierBorder(severityOf(a))}`, padding: '11px 14px', borderRadius: 'var(--radius-chip)', marginBottom: '8px' }}>
+                      <div style={{ display: 'flex', gap: '8px', fontSize: '11px', marginBottom: '4px', alignItems: 'center' }}>
+                        <span style={{ ...S.badge, ...tierBadge(severityOf(a)) }}>{a.severity ?? 'Warning'}</span>
+                        {a.informationClass && <span style={{ color: 'var(--muted)' }}>{a.informationClass}</span>}
+                      </div>
+                      <strong style={{ fontSize: '14px', color: 'var(--ink)' }}>{a.title}</strong>
+                      <p style={{ margin: '4px 0 0', fontSize: '12.5px', color: 'var(--ink)', maxWidth: '78ch' }}>{a.description}</p>
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* NWP */}
-            {activeNav==='nwp' && nwpComparison && (
-              <div className="nwp-panel-desktop">
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'12px' }}>
-                  <h3 style={{ margin:0, fontSize:'16px' }}>🛰️ NWP Multi-Model Ensemble</h3>
-                  <span style={{ background:'#0284c7', color:'white', padding:'4px 10px', borderRadius:'12px', fontSize:'12px', fontWeight:700 }}>
-                    Consensus: {nwpComparison.consensus?.consensusScorePercentage}% ({nwpComparison.consensus?.confidenceLevel})
-                  </span>
-                </div>
-                <p style={{ fontSize:'13px', color:'#cbd5e1', margin:'0 0 12px' }}>{nwpComparison.consensus?.synopticSummary}</p>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px' }}>
-                  {nwpComparison.models?.map((m: any,i: number) => (
-                    <div key={i} style={{ background:'rgba(2,6,23,0.6)', padding:'12px', borderRadius:'8px', border:'1px solid rgba(255,255,255,0.08)' }}>
-                      <strong style={{ color:'#38bdf8' }}>{m.modelName}</strong> ({m.resolution})
-                      <div style={{ fontSize:'12px', margin:'4px 0' }}>Max: {m.maxTemp}°C | Min: {m.minTemp}°C</div>
-                      <div style={{ fontSize:'12px', color:'#94a3b8' }}>Rain: {m.totalPrecipitation} mm | Wind: {m.maxWindSpeed} km/h</div>
-                      <div style={{ fontSize:'11px', color:'#67e8f9', marginTop:'4px' }}>{m.synopticCondition}</div>
+              {activePage === 'climate' && (
+                <div style={P.panel} className="page-panel">
+                  <header>
+                    <h2 style={P.h2}>Climate analysis for {location.name}</h2>
+                  </header>
+                  {climateError && !climateInfo ? (
+                    <div style={S.error} role="alert">
+                      <p style={{ margin: 0, fontWeight: 600 }}>Unable to load climate data.</p>
+                      <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>{climateError}</p>
+                      <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('climate')}>Retry</button>
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Sectors */}
-            {activeNav==='sectors' && (
-              <div className="sector-panel-desktop">
-                <div style={{ display:'flex', gap:'8px', marginBottom:'14px', flexWrap:'wrap' }}>
-                  {(['agriculture','aviation','marine','urban'] as const).map(sec => (
-                    <button key={sec} onClick={() => setActiveSector(sec)} style={{ background:activeSector===sec?'#0284c7':'rgba(255,255,255,0.05)', color:'white', border:'none', padding:'6px 14px', borderRadius:'6px', cursor:'pointer', fontSize:'12px', fontWeight:600 }}>
-                      {sec==='agriculture'?'🌾 Agriculture':sec==='aviation'?'✈️ Aviation':sec==='marine'?'⚓ Marine':'🏙️ Smart City'}
-                    </button>
-                  ))}
-                </div>
-                {sectorLoading ? (
-                  <div style={{ textAlign:'center', padding:'20px', color:'#94a3b8' }}>Loading {activeSector} advisory… ⏳</div>
-                ) : (<>
-                  {activeSector==='agriculture' && sectorAdvisory?.agriculture && (
-                    <div style={{ fontSize:'12px', lineHeight:'1.7', display:'flex', flexDirection:'column', gap:'10px' }}>
-                      {[['🌾 Sowing Advice','rgba(34,197,94,0.1)','rgba(34,197,94,0.3)','#86efac',sectorAdvisory.agriculture.sowingAdvisory],
-                        ['💧 Irrigation','rgba(59,130,246,0.1)','rgba(59,130,246,0.3)','#93c5fd',sectorAdvisory.agriculture.irrigationRecommendation],
-                        ['🧪 Spraying','rgba(168,85,247,0.1)','rgba(168,85,247,0.3)','#d8b4fe',sectorAdvisory.agriculture.sprayingWindow]].map(([title,bg,bc,tc,text])=>(
-                        <div key={title as string} style={{ background:bg as string, border:`1px solid ${bc}`, padding:'12px', borderRadius:'8px' }}>
-                          <p style={{ margin:'0 0 4px', fontWeight:600, color:tc as string }}>{title as string}</p>
-                          <p style={{ margin:0, color:'#cbd5e1' }}>{text as string}</p>
+                  ) : !climateInfo ? (
+                    <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }} aria-busy={climateLoading}>
+                      <p style={{ margin: 0 }}>Loading climate data for <strong>{location.name}</strong>…</p>
+                    </div>
+                  ) : (<>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: '10px' }}>
+                      {climateMetrics.map(({ label, value, sub, icon: Icon }) => (
+                        <div key={label} style={P.metaCard}>
+                          <div style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <Icon size={13} style={{ color: 'var(--slate-teal)' }} /> {label}
+                          </div>
+                          <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--ink)', fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+                          <div style={{ fontSize: '10.5px', color: 'var(--muted)' }}>{sub}</div>
                         </div>
                       ))}
                     </div>
-                  )}
-                  {activeSector==='aviation' && sectorAdvisory?.aviation && (
-                    <div style={{ fontSize:'12px', lineHeight:'1.7', display:'flex', flexDirection:'column', gap:'10px' }}>
-                      <div style={{ background:'rgba(56,189,248,0.1)', border:'1px solid rgba(56,189,248,0.3)', padding:'12px', borderRadius:'8px' }}>
-                        <p style={{ margin:'0 0 4px', fontWeight:600 }}>✈️ Flight Category</p>
-                        <p style={{ margin:0, color:'#cbd5e1', fontWeight:700 }}>{sectorAdvisory.aviation.flightCategory}</p>
+                    {climateInfo.yearlyMetrics?.length > 0 && (
+                      <div style={P.metaCard}>
+                        <p style={{ margin: '0 0 12px', fontSize: '13px', fontWeight: 600, color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                          <TrendingUp size={15} style={{ color: 'var(--slate-teal)' }} /> Year-by-year temperature
+                        </p>
+                        <div style={{ display: 'flex', alignItems: 'flex-end', gap: '4px', height: '80px', overflowX: 'auto', paddingBottom: '4px' }}>
+                          {climateInfo.yearlyMetrics.map((ym: any, i: number) => {
+                            const temps = climateInfo.yearlyMetrics.map((y: any) => y.meanTemperature || 0);
+                            const mn = Math.min(...temps), mx = Math.max(...temps), rng = mx - mn || 1;
+                            const h = Math.max(8, ((ym.meanTemperature - mn) / rng) * 64 + 8);
+                            const warm = ym.meanTemperature > (mn + mx) / 2;
+                            return (
+                              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px', minWidth: '32px' }}>
+                                <div title={`${ym.year}: ${ym.meanTemperature}°C`}
+                                  style={{ width: '20px', height: `${h}px`, background: warm ? 'var(--slate-teal)' : 'var(--line)', borderRadius: '3px 3px 0 0' }} />
+                                <span style={{ fontSize: '9px', color: 'var(--muted)', writingMode: 'vertical-rl' }}>{ym.year}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                      <div style={{ background:'rgba(17,24,39,0.8)', border:'1px solid rgba(255,255,255,0.1)', padding:'12px', borderRadius:'8px', fontFamily:'monospace', fontSize:'11px' }}>
-                        <p style={{ margin:0, color:'#93c5fd' }}>{sectorAdvisory.aviation.metarCode}</p>
-                      </div>
-                    </div>
-                  )}
-                  {activeSector==='marine' && sectorAdvisory?.marine && (
-                    <div style={{ fontSize:'12px', lineHeight:'1.7', display:'flex', flexDirection:'column', gap:'10px' }}>
-                      <div style={{ background:'rgba(6,182,212,0.1)', border:'1px solid rgba(6,182,212,0.3)', padding:'12px', borderRadius:'8px' }}>
-                        <p style={{ margin:'0 0 4px', fontWeight:600, color:'#67e8f9' }}>⚓ Fishermen Directive</p>
-                        <p style={{ margin:0, color:'#cbd5e1' }}>{sectorAdvisory.marine.fishermenAction}</p>
-                      </div>
-                    </div>
-                  )}
-                  {activeSector==='urban' && sectorAdvisory?.smartCity && (
-                    <div style={{ fontSize:'12px', lineHeight:'1.7', display:'flex', flexDirection:'column', gap:'10px' }}>
-                      <div style={{ background:'rgba(217,119,6,0.1)', border:'1px solid rgba(217,119,6,0.3)', padding:'12px', borderRadius:'8px' }}>
-                        <p style={{ margin:'0 0 4px', fontWeight:600, color:'#fcd34d' }}>🌊 Flood Risk</p>
-                        <p style={{ margin:0, color:'#cbd5e1' }}>{sectorAdvisory.smartCity.waterloggingFloodRisk}</p>
-                      </div>
-                    </div>
-                  )}
-                </>)}
-              </div>
-            )}
-
-            {/* Alerts */}
-            {activeNav==='alerts' && (
-              <div className="alerts-panel-desktop">
-                <h3 style={{ margin:'0 0 12px', fontSize:'16px' }}>🚨 IMD Colour-Coded Early Warnings</h3>
-                {alertsList.length===0 ? (
-                  <div style={{ textAlign:'center', padding:'20px', color:'#10b981' }}>
-                    <CheckCircle size={36}/>
-                    <p>🟢 <strong>IMD Green: Normal Weather Conditions</strong></p>
-                    <span style={{ fontSize:'12px', color:'#94a3b8' }}>No severe weather warnings for {currentCity}.</span>
-                  </div>
-                ) : alertsList.map((a: any) => (
-                  <div key={a.id} style={{ background:'rgba(2,6,23,0.5)', borderLeft:'4px solid #f59e0b', padding:'10px 14px', borderRadius:'6px', marginBottom:'8px' }}>
-                    <div style={{ display:'flex', gap:'8px', fontSize:'11px', marginBottom:'4px' }}>
-                      <span style={{ background:'#ef4444', color:'white', padding:'1px 6px', borderRadius:'4px' }}>{a.severity}</span>
-                      <span style={{ color:'#38bdf8' }}>{a.informationClass}</span>
-                    </div>
-                    <strong style={{ fontSize:'14px' }}>{a.title}</strong>
-                    <p style={{ margin:'4px 0', fontSize:'12px', color:'#cbd5e1' }}>{a.description}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Climate */}
-            {activeNav==='climate' && (
-              <div className="climate-panel-desktop" style={{ overflowY:'auto', flex:1 }}>
-                <h3 style={{ margin:'0 0 16px', fontSize:'16px' }}>📈 Climate Analysis — {currentCity}</h3>
-                {!climateInfo ? (
-                  <div style={{ textAlign:'center', padding:'40px', color:'#94a3b8' }}>
-                    <div style={{ fontSize:'32px', marginBottom:'12px' }}>📊</div>
-                    <p style={{ margin:0 }}>Loading climate data for <strong>{currentCity}</strong>…</p>
-                  </div>
-                ) : (<>
-                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))', gap:'10px', marginBottom:'16px' }}>
-                    {[
-                      ['🔥 Warming','#f87171',`+${climateInfo.warmingRatePerDecade}°C`,'per decade'],
-                      ['🌡️ Baseline','#38bdf8',`${climateInfo.baselineMeanTemperature}°C`,'30-yr normal'],
-                      ['🌧️ Annual Rain','#67e8f9',`${climateInfo.baselineAnnualPrecipitation} mm`,'per year'],
-                    ].map(([label,color,val,sub])=>(
-                      <div key={label as string} style={{ background:'rgba(2,6,23,0.6)', border:`1px solid ${color}33`, padding:'12px', borderRadius:'10px', textAlign:'center' }}>
-                        <div style={{ fontSize:'11px', color:'#94a3b8', marginBottom:'4px' }}>{label as string}</div>
-                        <div style={{ fontSize:'22px', fontWeight:800, color:color as string }}>{val as string}</div>
-                        <div style={{ fontSize:'10px', color:'#64748b' }}>{sub as string}</div>
-                      </div>
-                    ))}
-                  </div>
-                  {climateInfo.yearlyMetrics?.length > 0 && (
-                    <div style={{ background:'rgba(2,6,23,0.55)', border:'1px solid rgba(255,255,255,0.07)', padding:'14px', borderRadius:'10px', marginBottom:'16px' }}>
-                      <p style={{ margin:'0 0 12px', fontSize:'13px', fontWeight:600, color:'#38bdf8' }}>📊 Year-by-Year Temperature</p>
-                      <div style={{ display:'flex', alignItems:'flex-end', gap:'4px', height:'80px', overflowX:'auto', paddingBottom:'4px' }}>
-                        {climateInfo.yearlyMetrics.map((ym: any, i: number) => {
-                          const temps = climateInfo.yearlyMetrics.map((y: any) => y.meanTemperature||0);
-                          const mn=Math.min(...temps), mx=Math.max(...temps), rng=mx-mn||1;
-                          const h=Math.max(8,((ym.meanTemperature-mn)/rng)*64+8);
-                          return (
-                            <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:'3px', minWidth:'32px' }}>
-                              <div title={`${ym.year}: ${ym.meanTemperature}°C`}
-                                style={{ width:'20px', height:`${h}px`, background:ym.meanTemperature>(mn+mx)/2?'linear-gradient(180deg,#f87171,#fb923c)':'linear-gradient(180deg,#38bdf8,#0ea5e9)', borderRadius:'3px 3px 0 0' }} />
-                              <span style={{ fontSize:'9px', color:'#64748b', writingMode:'vertical-rl' }}>{ym.year}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ background:'rgba(2,6,23,0.55)', border:'1px solid rgba(255,255,255,0.07)', borderRadius:'10px', overflow:'hidden', marginBottom:'16px', minHeight:'280px' }}>
-                    <div style={{ padding:'10px 14px', borderBottom:'1px solid rgba(255,255,255,0.06)', fontSize:'13px', fontWeight:600, color:'#38bdf8' }}>🗺️ Location Map — {currentCity}</div>
-                    <ClimateMapEmbed city={currentCity} />
-                  </div>
-                </>)}
-              </div>
-            )}
-          </div>
-
-          {activeNav==='aichat' && (
-            <div className="simple-chat">
-              {messages.map(msg => (
-                <div key={msg.id} className={`message ${msg.role}`}>
-                  <div className="message-bubble">
-                    {msg.content.split('\n').map((line, i) => (
-                      <p key={i} className={line.startsWith('•')?'message-bullet':line.startsWith('**')?'message-bold':''}>
-                        {line.replace(/\*\*/g,'')}
-                      </p>
-                    ))}
-                    {msg.role==='bot' && (
-                      <button className="read-aloud-btn" onClick={() => handleSpeakText(msg)}
-                        style={{ background:'transparent', border:'none', color:'#38bdf8', cursor:'pointer', display:'flex', alignItems:'center', gap:'4px', marginTop:'6px', fontSize:'12px' }}>
-                          {isSpeaking&&isSpeakingId===msg.id ? <VolumeX size={14}/> : <Volume2 size={14}/>}
-                          <span>{isSpeaking&&isSpeakingId===msg.id?'Stop Speech':'Listen'}</span>
-                        </button>
                     )}
-                  </div>
-                </div>
-              ))}
-              {isLoading && (
-                <div className="message bot typing">
-                  <div className="typing-dots"><span/><span/><span/></div>
+                    <div style={{ ...P.metaCard, padding: 0, overflow: 'hidden' }}>
+                      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)', fontSize: '13px', fontWeight: 600, color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: '7px' }}>
+                        <MapIcon size={15} style={{ color: 'var(--slate-teal)' }} /> Location map for {location.name}
+                      </div>
+                      <ClimateMapEmbed city={location.name} />
+                    </div>
+                  </>)}
                 </div>
               )}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
 
-          {activeNav==='aichat' && (
-            <div className="input-area">
-            <div className="input-container">
-              <input ref={inputRef} type="text"
-                placeholder={voiceEnabled ? `Listening in ${activeLangObj.label}…` : `Ask WeatherGPT in ${activeLangObj.label}… (e.g. 'Rain in Delhi')`}
-                value={input} onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();} }}
-                className={voiceEnabled?'voice-active':''} />
-              <button className={`mic-btn ${voiceEnabled?'active':''}`} onClick={toggleVoice} disabled={!sttSupported} title="Voice Input" aria-label="Voice Input"><Mic size={20}/></button>
-              <button className="send-btn" onClick={() => handleSend()} disabled={!input.trim()||isLoading} aria-label="Send"><Send size={18}/></button>
+              {activePage === 'route' && <RouteWeatherView />}
+              {activePage === 'report' && <WeatherReportView />}
+              {activePage === 'map' && <WeatherMapView />}
+              {activePage === 'radar' && <WeatherRadarView />}
             </div>
-            <p className="input-hint">Multilingual ({activeLangObj.label}) · Enter to send · MoES / IMD Aligned</p>
-            </div>
-          )}
+          </main>
+        )}
 
-          <footer className="simple-footer">
-            <p>WeatherGPT · MoES / IMD · Open-Meteo · Ollama (llama3.2)</p>
-          </footer>
-        </>)}
-      </main>
+        <footer className="app-footer" aria-label="Site links">
+          <span>© 2026 WeatherGPT</span>
+          <span className="app-footer-links">
+            <a href="/privacy.html">Privacy Policy</a>
+            <span className="app-footer-sep" aria-hidden="true">·</span>
+            <a href="/terms.html">Terms of Use</a>
+          </span>
+          <span className="app-footer-src">Weather data: Open-Meteo · IMD warnings · Map tiles: OpenStreetMap</span>
+        </footer>
+      </div>
 
-      <ChatDrawer isOpen={chatDrawerOpen} onClose={() => setChatDrawerOpen(false)} selectedLang={selectedLang} onLanguageChange={setSelectedLang} />
-      <MobileChatToggle isOpen={mobileChatOpen} onClose={() => setMobileChatOpen(false)} />
+      <MobileDrawer
+        open={drawerOpen}
+        activePage={activePage}
+        onNavigate={handleNavigate}
+        onClose={() => setDrawerOpen(false)}
+      />
     </div>
   );
 }
+
+const NAV_LABELS: Record<NavPage, string> = {
+  forecast: 'Forecast',
+  nwp: 'NWP models',
+  sectors: 'Sectors',
+  alerts: 'Alerts & history',
+  climate: 'Climate',
+  route: 'Route weather',
+  report: 'Weather report',
+  map: 'Weather map',
+  radar: 'Radar',
+};

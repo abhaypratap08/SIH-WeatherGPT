@@ -17,9 +17,6 @@ export const JAVA_API_BASE =
 export const ML_API_BASE =
   "https://bubbly-abundance-production-4c2a.up.railway.app";
 
-// Kept for MobileWeatherGPT backward compatibility.
-export const API_BASE_URL = "";
-
 // ── Java backend endpoints ──────────────────────────────────────────
 
 export const WEATHER_ENDPOINTS = {
@@ -54,9 +51,6 @@ export const CLIMATE_ENDPOINT = (
   `${JAVA_API_BASE}/api/weather/climate?location=${encodeURIComponent(
     location,
   )}&startYear=${startYear}&endYear=${endYear}`;
-
-export const CHAT_ENDPOINT =
-  `${JAVA_API_BASE}/api/chat/query`;
 
 // ── Python ML backend endpoints ─────────────────────────────────────
 
