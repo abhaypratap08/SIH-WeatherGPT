@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Anchor,
   Building2,
@@ -7,6 +7,7 @@ import {
   Droplets,
   Flame,
   Map as MapIcon,
+  MapPin,
   Plane,
   SprayCan,
   Sprout,
@@ -36,7 +37,12 @@ import {
   type WeatherQueryCoords,
 } from './config/api';
 import { useTheme } from './hooks/useTheme';
-import { reverseGeocodeLabel, useLocation } from './location/LocationContext';
+import {
+  reverseGeocodeLabel,
+  useLocation,
+  type SelectedLocation,
+} from './location/LocationContext';
+import { reportCacheKey } from './location/locationCore';
 
 // ─────────────────────────────────────────────────────────────────────
 // Types
@@ -137,12 +143,11 @@ async function fetchForecastRecord(place: GeoResult): Promise<ForecastRecord> {
   };
 }
 /**
- * Per-location cache key so a Delhi response can never satisfy a Ghaziabad
- * request (§22): the key embeds the coordinates.
+ * Per-location offline cache: `reportCacheKey` (locationCore) embeds the
+ * coordinates so a Delhi record can never satisfy a Ghaziabad request; the
+ * cache is read only for the CURRENT coordinates and never seeds the
+ * canonical selection (§cache rules — persistence cannot resurrect a location).
  */
-function reportCacheKey(lat: number, lon: number): string {
-  return `weatherGPT_offline_forecast_${lat.toFixed(2)}_${lon.toFixed(2)}`;
-}
 function loadCachedForecast(lat: number, lon: number): ForecastRecord | null {
   try { return JSON.parse(localStorage.getItem(reportCacheKey(lat, lon)) ?? 'null'); } catch { return null; }
 }
@@ -263,12 +268,11 @@ function readApiResponseMessage(text: string): string | null {
  * The canonical location's name is a DISPLAY LABEL (it can be a reverse-
  * geocoded POI such as "16th Park View(GYC)"), so coordinates are the
  * authoritative query while the name travels along purely for presentation.
+ *
+ * Null-rejecting by construction: callers must guard `location === null`
+ * (no location → no request) before invoking this.
  */
-function toWeatherQuery(loc: {
-  name: string;
-  latitude: number;
-  longitude: number;
-}): WeatherQueryCoords {
+function toWeatherQuery(loc: SelectedLocation): WeatherQueryCoords {
   return { latitude: loc.latitude, longitude: loc.longitude, name: loc.name };
 }
 
@@ -276,49 +280,41 @@ function toWeatherQuery(loc: {
 // ClimateMapEmbed — OSM map inside climate panel
 // ─────────────────────────────────────────────────────────────────────
 
-function ClimateMapEmbed({ city }: { city: string }) {
+/**
+ * Small OSM map centred on the canonical selected location. The viewport and
+ * the marker use the coordinates passed in — never a city-name geocode and
+ * never a fallback center: the caller only renders this when a location
+ * exists (no location → the climate page shows the NoLocation state instead).
+ */
+function ClimateMapEmbed({ lat, lon, label }: { lat: number; lon: number; label: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     if (!ref.current || mapRef.current) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     let cancelled = false;
     import('leaflet').then((L) => {
       if (mapRef.current) return;
-      fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`)
-        .then(r => r.json())
-        .then(data => {
-          if (cancelled || mapRef.current) return;
-          const r = data.results?.[0];
-          const lat = r?.latitude ?? 20.5937;
-          const lng = r?.longitude ?? 78.9629;
-          const map = L.map(ref.current!, { center: [lat, lng], zoom: 7, scrollWheelZoom: false });
-          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
-          }).addTo(map);
-          const icon = L.divIcon({
-            className: '',
-            html: '<div class="map-loc-dot"></div>',
-            iconSize: [12, 12], iconAnchor: [6, 6],
-          });
-          L.marker([lat, lng], { icon }).addTo(map).bindPopup(city);
-          mapRef.current = map;
-          if (!cancelled) setLoaded(true);
-        })
-        .catch(() => {
-          if (cancelled || mapRef.current) return;
-          const map = L.map(ref.current!, { center: [20.5937, 78.9629], zoom: 5, scrollWheelZoom: false });
-          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-          mapRef.current = map;
-          if (!cancelled) setLoaded(true);
-        });
+      const map = L.map(ref.current!, { center: [lat, lon], zoom: 7, scrollWheelZoom: false });
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
+      }).addTo(map);
+      const icon = L.divIcon({
+        className: '',
+        html: '<div class="map-loc-dot"></div>',
+        iconSize: [12, 12], iconAnchor: [6, 6],
+      });
+      L.marker([lat, lon], { icon }).addTo(map).bindPopup(label);
+      mapRef.current = map;
+      if (!cancelled) setLoaded(true);
     });
     return () => {
       cancelled = true;
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
     };
-  }, [city]);
+  }, [lat, lon, label]);
 
   return (
     <div style={{ position: 'relative', height: '280px', width: '100%' }}>
@@ -337,11 +333,11 @@ function ClimateMapEmbed({ city }: { city: string }) {
 // ─────────────────────────────────────────────────────────────────────
 
 function RouteWeatherView() {
-  // The route planner is a user-driven journey form: origin defaults to the
-  // currently selected location, but the fields stay freely editable (a route
-  // analysis is not the same thing as "the selected weather location").
-  const { location: currentLocation } = useLocation();
-  const [form, setForm] = useState({ origin: currentLocation.name || 'Delhi', destination: 'Agra', departure_time: '08:00' });
+  // The route planner is a user-driven journey form. It does NOT seed the
+  // fields from the selected location and has no city defaults: the user
+  // names both endpoints, so no hardcoded or pre-filled geography can ever
+  // reach the route-weather API (§no-location).
+  const [form, setForm] = useState({ origin: '', destination: '', departure_time: '08:00' });
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<RouteApiResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -376,7 +372,7 @@ function RouteWeatherView() {
               <label style={S.label}>{field.charAt(0).toUpperCase() + field.slice(1)}</label>
               <input style={S.input} type="text" name={field} value={form[field]}
                 onChange={e => setForm({ ...form, [field]: e.target.value })} required
-                placeholder={field === 'origin' ? 'e.g. Delhi' : 'e.g. Agra'} />
+                placeholder={field === 'origin' ? 'Starting point' : 'Finish point'} />
             </div>
           ))}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -469,7 +465,7 @@ function WeatherReportView() {
   const { location, setLocation } = useLocation();
   const [cityInput, setCityInput] = useState('');
   const [record, setRecord] = useState<ForecastRecord | null>(() =>
-    loadCachedForecast(location.latitude, location.longitude),
+    location ? loadCachedForecast(location.latitude, location.longitude) : null,
   );
   const [loading, setLoading] = useState(false);
   const [banner, setBanner] = useState<{ tone: 'error' | 'info'; text: string } | null>(null);
@@ -483,9 +479,15 @@ function WeatherReportView() {
   }, []);
 
   // Follows the canonical location: show the per-location offline cache, or
-  // fetch the forecast for exactly these coordinates.
+  // fetch the forecast for exactly these coordinates. No location → no
+  // forecast and no fetch (§no-location).
   useEffect(() => {
-    const { latitude, longitude, name, source } = location;
+    if (!location) {
+      setRecord(null);
+      lastKeyRef.current = '';
+      return;
+    }
+    const { latitude, longitude, name } = location;
     const key = `${latitude},${longitude}`;
     const cached = loadCachedForecast(latitude, longitude);
     if (cached) {
@@ -501,7 +503,9 @@ function WeatherReportView() {
     setBanner(null);
     (async () => {
       try {
-        const label = source !== 'default' && name ? name : await reverseGeocodeLabel(latitude, longitude);
+        const label = name && name !== 'Selected point'
+          ? name
+          : await reverseGeocodeLabel(latitude, longitude);
         const r = await fetchForecastRecord({ latitude, longitude, name: label });
         if (!cancelled) { saveForecast(r, latitude, longitude); setRecord(r); }
       } catch {
@@ -551,7 +555,7 @@ function WeatherReportView() {
         </span>
         <input style={{ ...S.input, flex: 1, minWidth: '180px' }} type="text" value={cityInput}
           onChange={e => setCityInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && search()}
-          placeholder="Enter city, e.g. Delhi" />
+          placeholder="Enter a city" />
         <button onClick={() => search()} disabled={loading}
           style={S.btn}>
           {loading ? 'Loading…' : 'Get weather'}
@@ -615,6 +619,31 @@ function WeatherReportView() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// NoLocation — shared "no location selected" state for every page that
+// depends on the canonical location. Rendered instead of the page content
+// (and instead of any fetch) whenever location === null (§no-location).
+// ─────────────────────────────────────────────────────────────────────
+
+function NoLocation({ feature }: { feature: string }) {
+  return (
+    <div style={P.panel} className="page-panel">
+      <header>
+        <h2 style={P.h2}>{feature}</h2>
+      </header>
+      <div style={{ textAlign: 'center', padding: '40px 24px', color: 'var(--muted)' }}>
+        <MapPin size={30} style={{ margin: '0 auto 12px', opacity: 0.6 }} />
+        <p style={{ margin: 0, fontWeight: 600, color: 'var(--ink)' }}>No location selected</p>
+        <p style={{ margin: '8px auto 0', fontSize: '13px', maxWidth: '48ch', lineHeight: 1.6 }}>
+          Choose where to check the weather — enable GPS from the pill, search a city on the
+          Weather report page, or tap the Weather map. Until a location exists, no weather
+          data is requested.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Root App component — chat-first layout
 // ─────────────────────────────────────────────────────────────────────
 
@@ -631,8 +660,14 @@ export default function App() {
   // One canonical selected location: the header pill, GPS, search, map taps
   // and every data fetch all read/write this single state. The AI chat
   // (AIChatWorkspace) consumes the same state and posts the current
-  // coordinates with every /agent request.
-  const { location, setLocation, locationKey } = useLocation();
+  // coordinates with every /agent request. `location === null` means "no
+  // location yet" — every data page below treats it as "no requests".
+  const {
+    location,
+    locationKey,
+    state: locationState,
+    requestGpsLocation,
+  } = useLocation();
 
   // ── Java-backend data state (rail/drawer pages) ──
   // Every data page carries explicit loading/error state so a failed request
@@ -652,42 +687,15 @@ export default function App() {
   const [climateLoading, setClimateLoading] = useState(false);
   const [climateError, setClimateError] = useState<string | null>(null);
 
-  // ── Geolocation feeds the one canonical location ──
-  // Auto-fill runs only when nothing has been chosen yet (default source), so
-  // a saved choice or a deep link is never silently overridden (§7).
-  const gpsToCanonical = useCallback((coords: { latitude: number; longitude: number }) => {
-    setLocation({ latitude: coords.latitude, longitude: coords.longitude, source: 'gps' });
-    void reverseGeocodeLabel(coords.latitude, coords.longitude).then((name) => {
-      if (name === 'Selected point') return;
-      // Only fill the name if the user hasn't already moved to another place.
-      setLocation((prev) => (prev.latitude === coords.latitude && prev.longitude === coords.longitude ? { name } : {}));
-    });
-  }, [setLocation]);
-
-  const requestLocation = useCallback(() => {
-    if (!('geolocation' in navigator)) return;
-    if (location.source !== 'default') return;
-    navigator.geolocation.getCurrentPosition(
-      p => gpsToCanonical({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
-      () => { /* denial or timeout: keep current location */ },
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
-    );
-  }, [location.source, gpsToCanonical]);
-
-  useEffect(() => { requestLocation(); }, [requestLocation]);
-
-  // Location pill: refresh the canonical location from device GPS.
-  const handleLocationClick = useCallback(() => {
-    if (!('geolocation' in navigator)) return;
-    navigator.geolocation.getCurrentPosition(
-      p => gpsToCanonical({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
-      () => { /* location access denied: keep last known place */ },
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
-    );
-  }, [gpsToCanonical]);
+  // ── Geolocation lives in the location store ──
+  // The provider owns the GPS request lifecycle (requesting-gps → selected /
+  // denied / error), the mount-time auto-fill and the reverse-geocode name
+  // fill. The header pill below calls requestGpsLocation (explicit intent —
+  // it always refreshes, and a failure never discards an existing selection).
 
   // Location change: drop stale page data and any stale loading/error state
-  // so every page re-queries against the new coordinates (§23).
+  // so every page re-queries against the new coordinates (§23). Runs for any
+  // locationKey transition, including null → coords and coords → null.
   useEffect(() => {
     setForecastList([]);
     setForecastLoading(false);
@@ -701,14 +709,16 @@ export default function App() {
     setSectorAdvisory(null);
     setSectorLoading(false);
     setSectorError(null);
+    setAlertsList([]);
   }, [locationKey]);
 
   // ── Data fetch for the rail/drawer pages ──
   // Lazy: each page fetches when first shown. There is deliberately NO
   // "already loaded" marker: a failed request must be retryable, and a
   // location change must trigger a fresh request for the new place.
+  // No location → NO request (§no-location).
   useEffect(() => {
-    if (!activePage) return;
+    if (!activePage || !location) return;
     const ctrl = new AbortController();
     const { signal } = ctrl;
     if (activePage === 'forecast') void fetchWeather(location, signal);
@@ -716,11 +726,12 @@ export default function App() {
     if (activePage === 'climate') void fetchClimate(location, signal);
     if (activePage === 'sectors') void fetchSector(location, activeSector, signal);
     return () => ctrl.abort();
-  }, [activePage, location.name, locationKey, activeSector]);
+  }, [activePage, location, locationKey, activeSector]);
 
   // Retry a failed page fetch with a fresh request (never blocked by stale
   // state). The controller is abandoned on navigation, which is harmless.
   const retryFetch = (kind: 'forecast' | 'nwp' | 'climate' | 'sector') => {
+    if (!location) return;
     const ctrl = new AbortController();
     const { signal } = ctrl;
     if (kind === 'forecast') void fetchWeather(location, signal);
@@ -730,14 +741,20 @@ export default function App() {
   };
 
   // Alerts are always fetched — the warning bulletin above the chat needs them.
+  // No location → no request, and any previous alerts are dropped so a stale
+  // warning can never appear under a "no location" header (§no-location).
   useEffect(() => {
+    if (!location) {
+      setAlertsList([]);
+      return;
+    }
     const ctrl = new AbortController();
     void fetchAlerts(location, ctrl.signal);
     return () => ctrl.abort();
-  }, [location.name]);
+  }, [location]);
 
   const fetchWeather = async (
-    loc: { name: string; latitude: number; longitude: number },
+    loc: SelectedLocation,
     signal: AbortSignal,
   ) => {
     setForecastLoading(true);
@@ -806,7 +823,7 @@ export default function App() {
       if (!signal.aborted) setForecastLoading(false);
     }
   };
-  const fetchNwp = async (loc: { name: string; latitude: number; longitude: number }, signal: AbortSignal) => {
+  const fetchNwp = async (loc: SelectedLocation, signal: AbortSignal) => {
     setNwpLoading(true);
     setNwpError(null);
     try {
@@ -828,7 +845,7 @@ export default function App() {
     }
   };
   const fetchSector = async (
-    loc: { name: string; latitude: number; longitude: number },
+    loc: SelectedLocation,
     sector: string,
     signal: AbortSignal,
   ) => {
@@ -850,7 +867,7 @@ export default function App() {
     }
   };
   const fetchAlerts = async (
-    loc: { name: string; latitude: number; longitude: number },
+    loc: SelectedLocation,
     signal: AbortSignal,
   ) => {
     try {
@@ -865,7 +882,7 @@ export default function App() {
     }
   };
   const fetchClimate = async (
-    loc: { name: string; latitude: number; longitude: number },
+    loc: SelectedLocation,
     signal: AbortSignal,
   ) => {
     setClimateLoading(true);
@@ -888,9 +905,11 @@ export default function App() {
   };
 
   // ── Active IMD warning (bulletin overrides routine answers structurally) ──
+  // No location → alerts are empty and no bulletin can be constructed; a
+  // location-less demo preview still renders the canned demo warning (dev only).
   const activeWarning = useMemo<ImdWarning | null>(() => {
     if (IS_DEMO) return DEMO_WARNING;
-    if (!alertsList.length) return null;
+    if (!location || !alertsList.length) return null;
     const a = alertsList[0];
     const text = a.description || a.warning || a.message || '';
     if (!text) return null;
@@ -901,7 +920,7 @@ export default function App() {
       text,
       issuedAt: a.issuedAt ?? a.issueTime ?? a.issued ?? undefined,
     };
-  }, [alertsList, location.name]);
+  }, [alertsList, location]);
 
   const handleNavigate = (page: NavPage) => {
     setActivePage(page);
@@ -935,12 +954,13 @@ export default function App() {
 
       <div className="main">
         <AppHeader
-          locationName={location.name}
+          locationName={location?.name ?? null}
+          locationStatus={locationState.status}
           lang={selectedLang}
           onLanguageChange={setSelectedLang}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onLocationClick={handleLocationClick}
+          onLocationClick={requestGpsLocation}
           drawerOpen={drawerOpen}
           onToggleDrawer={() => setDrawerOpen(v => !v)}
         />
@@ -952,7 +972,7 @@ export default function App() {
         ) : (
           <main className="page-view" aria-label={NAV_LABELS[activePage] ?? activePage}>
             <div className="page-view-inner">
-              {activePage === 'forecast' && (
+              {activePage === 'forecast' && (location ? (
                 <div style={P.panel} className="page-panel">
                   <header>
                     <h2 style={P.h2}>7-Day Forecast for {location.name}</h2>
@@ -980,63 +1000,71 @@ export default function App() {
                   </div>
                   )}
                 </div>
-              )}
+              ) : (
+                <NoLocation feature="7-Day Forecast" />
+              ))}
 
-              {activePage === 'nwp' && nwpComparison && nwpComparison.models.length > 0 && (
-                <div style={P.panel} className="page-panel">
-                  <header>
-                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
-                  </header>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                    <span style={{ ...S.badge, background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' }}>
-                      Consensus: {nwpComparison.consensus?.consensusScorePercentage}% ({nwpComparison.consensus?.confidenceLevel})
-                    </span>
-                  </div>
-                  <p style={{ fontSize: '13px', color: 'var(--muted)', margin: 0 }}>{nwpComparison.consensus?.synopticSummary}</p>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: '10px' }}>
-                    {nwpComparison.models?.map((m: any, i: number) => (
-                      <div key={i} style={P.metaCard}>
-                        <strong style={{ color: 'var(--slate-teal)' }}>{m.modelName}</strong> <span style={{ color: 'var(--muted)', fontSize: '12px' }}>({m.resolution})</span>
-                        <div style={{ fontSize: '12.5px', margin: '4px 0', color: 'var(--ink)' }}>
-                          Max <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.maxTemp}°C</b> · Min <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.minTemp}°C</b>
-                        </div>
-                        <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Rain: {m.totalPrecipitation} mm · Wind: {m.maxWindSpeed} km/h</div>
-                        <div style={{ fontSize: '11.5px', color: 'var(--slate-teal)', marginTop: '4px' }}>{m.synopticCondition}</div>
+              {activePage === 'nwp' && (location ? (
+                <>
+                  {nwpComparison && nwpComparison.models.length > 0 && (
+                    <div style={P.panel} className="page-panel">
+                      <header>
+                        <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                      </header>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        <span style={{ ...S.badge, background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' }}>
+                          Consensus: {nwpComparison.consensus?.consensusScorePercentage}% ({nwpComparison.consensus?.confidenceLevel})
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                      <p style={{ fontSize: '13px', color: 'var(--muted)', margin: 0 }}>{nwpComparison.consensus?.synopticSummary}</p>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: '10px' }}>
+                        {nwpComparison.models?.map((m: any, i: number) => (
+                          <div key={i} style={P.metaCard}>
+                            <strong style={{ color: 'var(--slate-teal)' }}>{m.modelName}</strong> <span style={{ color: 'var(--muted)', fontSize: '12px' }}>({m.resolution})</span>
+                            <div style={{ fontSize: '12.5px', margin: '4px 0', color: 'var(--ink)' }}>
+                              Max <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.maxTemp}°C</b> · Min <b style={{ fontVariantNumeric: 'tabular-nums' }}>{m.minTemp}°C</b>
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Rain: {m.totalPrecipitation} mm · Wind: {m.maxWindSpeed} km/h</div>
+                            <div style={{ fontSize: '11.5px', color: 'var(--slate-teal)', marginTop: '4px' }}>{m.synopticCondition}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-              {activePage === 'nwp' && nwpComparison && nwpComparison.models.length === 0 && (
-                <div style={P.panel} className="page-panel">
-                  <header>
-                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
-                  </header>
-                  <p style={{ textAlign: 'center', padding: '24px', color: 'var(--muted)', margin: 0 }}>
-                    No NWP model data is currently available.
-                  </p>
-                </div>
-              )}
+                  {nwpComparison && nwpComparison.models.length === 0 && (
+                    <div style={P.panel} className="page-panel">
+                      <header>
+                        <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                      </header>
+                      <p style={{ textAlign: 'center', padding: '24px', color: 'var(--muted)', margin: 0 }}>
+                        No NWP model data is currently available.
+                      </p>
+                    </div>
+                  )}
 
-              {activePage === 'nwp' && nwpError && !nwpComparison && (
-                <div style={P.panel} className="page-panel">
-                  <header>
-                    <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
-                  </header>
-                  <div style={S.error} role="alert">
-                    <p style={{ margin: 0, fontWeight: 600 }}>Unable to load NWP models.</p>
-                    <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>The weather-model service did not return usable data ({nwpError}).</p>
-                    <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('nwp')}>Retry</button>
-                  </div>
-                </div>
-              )}
+                  {nwpError && !nwpComparison && (
+                    <div style={P.panel} className="page-panel">
+                      <header>
+                        <h2 style={P.h2}>NWP Multi-Model Ensemble for {location.name}</h2>
+                      </header>
+                      <div style={S.error} role="alert">
+                        <p style={{ margin: 0, fontWeight: 600 }}>Unable to load NWP models.</p>
+                        <p style={{ margin: '6px 0 0', fontSize: '12.5px' }}>The weather-model service did not return usable data ({nwpError}).</p>
+                        <button type="button" style={{ ...S.btn, marginTop: '10px' }} onClick={() => retryFetch('nwp')}>Retry</button>
+                      </div>
+                    </div>
+                  )}
 
-              {activePage === 'nwp' && !nwpComparison && !nwpError && (
-                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }} aria-busy={nwpLoading}>Loading NWP models…</div>
-              )}
+                  {!nwpComparison && !nwpError && (
+                    <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }} aria-busy={nwpLoading}>Loading NWP models…</div>
+                  )}
+                </>
+              ) : (
+                <NoLocation feature="NWP models" />
+              ))}
 
-              {activePage === 'sectors' && (
+              {activePage === 'sectors' && (location ? (
                 <div style={P.panel} className="page-panel">
                   <header>
                     <h2 style={P.h2}>Sector advisories for {location.name}</h2>
@@ -1116,9 +1144,11 @@ export default function App() {
                     )}
                   </>)}
                 </div>
-              )}
+              ) : (
+                <NoLocation feature="Sector advisories" />
+              ))}
 
-              {activePage === 'alerts' && (
+              {activePage === 'alerts' && (location ? (
                 <div style={P.panel} className="page-panel">
                   <header>
                     <h2 style={P.h2}>IMD colour-coded early warnings for {location.name}</h2>
@@ -1140,9 +1170,11 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-              )}
+              ) : (
+                <NoLocation feature="Alerts & history" />
+              ))}
 
-              {activePage === 'climate' && (
+              {activePage === 'climate' && (location ? (
                 <div style={P.panel} className="page-panel">
                   <header>
                     <h2 style={P.h2}>Climate analysis for {location.name}</h2>
@@ -1195,11 +1227,13 @@ export default function App() {
                       <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)', fontSize: '13px', fontWeight: 600, color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: '7px' }}>
                         <MapIcon size={15} style={{ color: 'var(--slate-teal)' }} /> Location map for {location.name}
                       </div>
-                      <ClimateMapEmbed city={location.name} />
+                      <ClimateMapEmbed lat={location.latitude} lon={location.longitude} label={location.name} />
                     </div>
                   </>)}
                 </div>
-              )}
+              ) : (
+                <NoLocation feature="Climate analysis" />
+              ))}
 
               {activePage === 'route' && <RouteWeatherView />}
               {activePage === 'report' && <WeatherReportView />}

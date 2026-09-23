@@ -11,19 +11,24 @@
  *   │          │              │             │
  * Warnings  report cache   point rain    charts / AI
  *
- * A location may exist as an initial default (Delhi) but it is never the
- * permanent source of truth: a GPS fix, a map tap, a search result, a chat
- * resolution or a deep link replaces it and every consumer re-queries
- * against the new coordinates.
+ * `location === null` is a first-class state: **no location has been selected
+ * yet**. Nothing is ever chosen implicitly. A location exists only after a
+ * REAL source provides one — a GPS fix, an explicit map tap, a search result,
+ * a chat resolution or a deep link. There is no default city, no persistence
+ * round-trip (old sessions never silently rehydrate a previous pick) and no
+ * hydration: a fresh visit starts `null` and stays `null` until the user (or
+ * the browser's geolocation, with permission) supplies coordinates.
+ *
+ * Every consumer must treat `location === null` as "no weather requests" —
+ * see docs/location-architecture.md.
  *
  * Selection sources (see docs/location-architecture.md):
- *  - default : initial state before the user chooses anything
- *  - url     : ?lat=..&lon=..&name=.. deep link (wins over persisted state)
- *  - gps     : browser geolocation (auto-fill only when nothing was chosen;
- *              the location pill click always refreshes it)
- *  - map     : tap on the Weather Map or Radar map
+ *  - url  : ?lat=..&lon=..&name=.. deep link (explicit intent)
+ *  - gps  : browser geolocation (auto-fill only when nothing was chosen; the
+ *           location pill click always refreshes it)
+ *  - map  : tap on the Weather Map or Radar map
  *  - search  : Weather report city search
- *  - chat    : location resolved by the AI assistant's answer
+ *  - chat : location resolved by the AI assistant's answer
  */
 import {
   createContext,
@@ -31,149 +36,167 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 
-export type LocationSource =
-  | 'default'
-  | 'url'
-  | 'gps'
-  | 'map'
-  | 'search'
-  | 'chat';
+import {
+  locationKeyOf,
+  parseDeepLink,
+  sanitize,
+  type LocationSource,
+  type SelectedLocation,
+} from './locationCore';
 
-export interface SelectedLocation {
-  latitude: number;
-  longitude: number;
-  /** Display name (reverse-geocoded, search result, or chat resolution). */
-  name: string;
-  region?: string;
-  country?: string;
-  /** How this location was last selected — auditable, not user-visible. */
-  source: LocationSource;
-}
+// Re-exported so existing consumers keep importing from LocationContext.
+export type { LocationSource, SelectedLocation } from './locationCore';
 
 export type LocationPatch = Partial<
   Pick<SelectedLocation, 'latitude' | 'longitude' | 'name' | 'region' | 'country'>
 > & { source?: LocationSource };
 
 /**
- * Initial default. This is only the starting state: any explicit selection
- * (GPS, map tap, search, chat, deep link) replaces it and every feature then
- * follows the new location. See docs/location-architecture.md.
+ * Discriminated status of the location feature. `status === 'selected'`
+ * means a real location exists (location === null only in the other states).
+ * `requesting-gps` is transient: the browser geolocation call is in flight.
+ * `denied` / `error` mean GPS failed AND no location has been selected by any
+ * other real source (a later map tap / search / deep link always recovers).
  */
-export const DEFAULT_LOCATION: SelectedLocation = {
-  latitude: 28.6139,
-  longitude: 77.209,
-  name: 'Delhi',
-  source: 'default',
+export type LocationState =
+  | { status: 'none' }
+  | { status: 'requesting-gps' }
+  | { status: 'selected' }
+  | { status: 'denied' }
+  | { status: 'error' };
+
+/**
+ * Mount-time seed from the URL deep link ONLY. Nothing else may seed the
+ * canonical state — no localStorage read, no default city. Delegates to the
+ * pure {@link parseDeepLink} core function so the parse logic is unit-
+ * testable without a DOM (tests/location_core.test.ts).
+ */
+function initFromUrl(): SelectedLocation | null {
+  if (typeof window === 'undefined') return null;
+  return parseDeepLink(window.location.search);
+}
+
+// GeolocationPositionError code for "permission denied".
+const PERMISSION_DENIED_CODE = 1;
+
+const GPS_OPTIONS: PositionOptions = {
+  enableHighAccuracy: false,
+  timeout: 8000,
+  maximumAge: 300000,
 };
 
-const STORAGE_KEY = 'weathergpt:selectedLocation';
-
-function isLat(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v) && v >= -90 && v <= 90;
-}
-function isLon(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v) && v >= -180 && v <= 180;
-}
-
-const SOURCES: LocationSource[] = ['default', 'url', 'gps', 'map', 'search', 'chat'];
-
-function sanitize(raw: unknown): SelectedLocation | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const o = raw as Record<string, unknown>;
-  if (!isLat(o.latitude) || !isLon(o.longitude)) return null;
-  const name =
-    typeof o.name === 'string' && o.name.trim() ? o.name.trim() : 'Selected point';
-  const source: LocationSource = SOURCES.includes(o.source as LocationSource)
-    ? (o.source as LocationSource)
-    : 'default';
-  return {
-    latitude: o.latitude as number,
-    longitude: o.longitude as number,
-    name,
-    region: typeof o.region === 'string' ? o.region : undefined,
-    country: typeof o.country === 'string' ? o.country : undefined,
-    source,
-  };
-}
-
-/** Deep link support: /weather?lat=..&lon=..&name=.. initialises the state.
- *  The params must actually be present: without them (a plain "/" load) the
- *  default location wins. Historically `Number(null)` yielded 0, which passed
- *  the valid-range check and silently replaced the default with a
- *  (0,0) "Selected point" location — poisoning every backend query. */
-function fromUrl(): SelectedLocation | null {
-  if (typeof window === 'undefined') return null;
-  const params = new URLSearchParams(window.location.search);
-  const latRaw = params.get('lat');
-  const lonRaw = params.get('lon');
-  if (latRaw === null || lonRaw === null || latRaw.trim() === '' || lonRaw.trim() === '') {
-    return null;
-  }
-  const lat = Number(latRaw);
-  const lon = Number(lonRaw);
-  if (!isLat(lat) || !isLon(lon)) return null;
-  return sanitize({
-    latitude: lat,
-    longitude: lon,
-    name: params.get('name') ?? 'Selected point',
-    source: 'url',
-  });
-}
-
-/** Persisted last-selected location (one remembered location, per §25). */
-function fromStorage(): SelectedLocation | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return sanitize(JSON.parse(raw));
-  } catch {
-    return null;
-  }
-}
-
-function hydrate(): SelectedLocation {
-  return fromUrl() ?? fromStorage() ?? DEFAULT_LOCATION;
-}
-
 interface LocationContextValue {
-  /** The one canonical selected location. */
-  location: SelectedLocation;
-  /** Update the canonical location. Unknown/invalid coordinates are ignored. */
-  setLocation: (patch: LocationPatch | ((prev: SelectedLocation) => LocationPatch)) => void;
-  /** Stable identity (lat,lon rounded) for cache keys and effects. */
-  locationKey: string;
+  /**
+   * The one canonical selected location. `null` until a real source (GPS,
+   * map tap, search, chat resolution, deep link) provides one — every data
+   * page must treat `null` as "no location, no weather requests".
+   */
+  location: SelectedLocation | null;
+  /** Discriminated status for the header pill / no-location UI. */
+  state: LocationState;
+  /** Stable identity (lat,lon rounded) for cache keys and effects; null-safe. */
+  locationKey: string | null;
+  /** Update the canonical location. Invalid/unknown patches are ignored. */
+  setLocation: (
+    patch: LocationPatch | ((prev: SelectedLocation | null) => LocationPatch),
+  ) => void;
+  /** Force a GPS refresh (header location pill). Explicit intent: it replaces
+   *  whatever is selected right now; a failure keeps the existing location. */
+  requestGpsLocation: () => void;
 }
 
 const LocationContext = createContext<LocationContextValue | null>(null);
 
 export function LocationProvider({ children }: { children: ReactNode }) {
-  const [location, setLocationState] = useState<SelectedLocation>(hydrate);
+  // Init from the URL deep link ONLY. Nothing else may seed the canonical
+  // state: no localStorage read, no default city (§location-architecture).
+  const [location, setLocationState] = useState<SelectedLocation | null>(() => initFromUrl());
+  const [status, setStatus] = useState<LocationState['status']>(
+    () => (initFromUrl() ? 'selected' : 'none'),
+  );
+
+  // Distinguishes the mount-time auto-fill (only fills while nothing was
+  // chosen) from an explicit pill click (always replaces the selection).
+  const explicitGpsRef = useRef(false);
+
+  // Latest location readable inside async GPS callbacks.
+  const locationRef = useRef(location);
+  locationRef.current = location;
 
   const setLocation = useCallback<LocationContextValue['setLocation']>((patch) => {
     setLocationState((prev) => {
       const next = typeof patch === 'function' ? patch(prev) : patch;
-      const merged = sanitize({ ...prev, ...next, source: next.source ?? prev.source });
-      return merged ?? prev;
+      // Full replacement: when the patch carries coordinates it must also
+      // carry a real source, or it cannot become a selection.
+      if ('latitude' in next || 'longitude' in next) {
+        const merged = sanitize({ ...prev, ...next, source: next.source ?? prev?.source });
+        return merged ?? prev;
+      }
+      // Name/region/country-only patch (e.g. the reverse-geocode label fill):
+      // only meaningful when a location already exists.
+      if (!prev) return prev;
+      return sanitize({ ...prev, ...next, source: next.source ?? prev.source }) ?? prev;
     });
+    setStatus('selected');
   }, []);
 
-  // Persist the one remembered location (coordinates + display name only).
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(location));
-    } catch {
-      /* storage unavailable (private mode / quota) — session-only is fine */
+  const runGpsRequest = useCallback((explicit: boolean) => {
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      setStatus('error');
+      return;
     }
-  }, [location]);
+    explicitGpsRef.current = explicit;
+    setStatus('requesting-gps');
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        const lat = p.coords.latitude;
+        const lon = p.coords.longitude;
+        setLocationState((prev) => {
+          // Auto-fill must never overwrite a selection the user made while
+          // the GPS call was in flight; an explicit pill click always wins.
+          if (!explicit && prev) return prev;
+          return sanitize({ latitude: lat, longitude: lon, source: 'gps' });
+        });
+        setStatus('selected');
+        void reverseGeocodeLabel(lat, lon).then((name) => {
+          if (name === 'Selected point') return;
+          // Only fill the name if the fix still matches the current location.
+          setLocationState((prev) =>
+            prev && prev.latitude === lat && prev.longitude === lon
+              ? sanitize({ ...prev, name })
+              : prev,
+          );
+        });
+      },
+      (err) => {
+        const denied = err?.code === PERMISSION_DENIED_CODE;
+        setStatus(() => (locationRef.current ? 'selected' : denied ? 'denied' : 'error'));
+      },
+      GPS_OPTIONS,
+    );
+  }, []);
 
-  const locationKey = `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
-  const value = useMemo(
-    () => ({ location, setLocation, locationKey }),
-    [location, setLocation, locationKey],
+  // Auto-fill once on mount: requesting-gps → selected / denied / error.
+  // Never yields a fake location — failure leaves location null. Deep-link
+  // sessions skip the auto-fill because a location already exists (url).
+  useEffect(() => {
+    if (locationRef.current) return;
+    runGpsRequest(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const requestGpsLocation = useCallback(() => runGpsRequest(true), [runGpsRequest]);
+
+  const locationKey = locationKeyOf(location);
+
+  const value = useMemo<LocationContextValue>(
+    () => ({ location, state: { status }, locationKey, setLocation, requestGpsLocation }),
+    [location, status, locationKey, setLocation, requestGpsLocation],
   );
 
   return <LocationContext.Provider value={value}>{children}</LocationContext.Provider>;
