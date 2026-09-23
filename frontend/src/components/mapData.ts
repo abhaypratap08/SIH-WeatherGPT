@@ -74,6 +74,17 @@ export const MEANINGFUL_RAIN = 0.05;
 export const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 export const OSM_TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
+/**
+ * Neutral Leaflet viewport used ONLY to initialise the map/radar views when
+ * no location has been selected yet (`location === null`, docs/location-
+ * architecture.md). It is a world view that is deliberately unambiguously
+ * "not a place": it is never fed into any weather request and never written
+ * into the canonical location — the first real selection (map tap, GPS,
+ * search, chat, deep link) re-centres the map immediately.
+ */
+export const NEUTRAL_MAP_VIEWPORT: [number, number] = [20, 0];
+export const NEUTRAL_MAP_ZOOM = 2;
+
 const OPEN_METEO =
   'https://api.open-meteo.com/v1/forecast?current=temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kmh';
 

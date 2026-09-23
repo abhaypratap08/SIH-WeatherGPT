@@ -2,6 +2,7 @@ import {
   CloudRain,
   Compass,
   Layers,
+  MapPin,
   Pause,
   Play,
   Radar,
@@ -12,10 +13,19 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import 'leaflet/dist/leaflet.css';
 import './WeatherMap.css';
-import { reverseGeocodeLabel, useLocation } from '../location/LocationContext';
+import {
+  reverseGeocodeLabel,
+  useLocation,
+} from '../location/LocationContext';
+import type {
+  LocationPatch,
+  SelectedLocation,
+} from '../location/LocationContext';
 import { ALERTS_ENDPOINT } from '../config/api';
 import {
   MEANINGFUL_RAIN,
+  NEUTRAL_MAP_VIEWPORT,
+  NEUTRAL_MAP_ZOOM,
   OSM_TILE_ATTR,
   OSM_TILE_URL,
   RadarFrame,
@@ -27,6 +37,12 @@ import {
   rainMovement,
 } from './mapData';
 import { WeatherField } from './weatherField';
+import {
+  coordsOf,
+  hasRealLocation,
+  mapTapLocation,
+  planRadarRequests,
+} from './radarCore';
 
 type Intensity = 'heavy' | 'moderate' | 'light' | 'dry';
 
@@ -59,6 +75,10 @@ function alertDotClass(a: any): string {
   return 'dot-slate';
 }
 
+type SetLocationFn = (
+  patch: LocationPatch | ((prev: SelectedLocation | null) => LocationPatch),
+) => void;
+
 /**
  * Precipitation Radar: "where is rain, how is it changing, what does it
  * mean?" Identical OSM basemap and the shared WeatherField renderer as the
@@ -66,11 +86,138 @@ function alertDotClass(a: any): string {
  * capability.md: an estimated 0.5 deg precipitation field from Open-Meteo
  * NWP model forecasts, now..+5 h real forecast frames, no district geometry,
  * no warning polygons, no lightning. Features not backed by data are not
- * exposed as controls. The anchor is the single canonical selected location;
- * tapping the map selects a new location and re-queries everything.
+ * exposed as controls.
+ *
+ * The page splits on the canonical location so the null state is structural:
+ *
+ *     WeatherRadarView()
+ *        | useLocation()
+ *        +---- location === null
+ *        |        -> <RadarNoLocation/>   (basemap only, zero requests)
+ *        +---- location exists
+ *                 -> <RadarWithLocation location={location}/>
+ *
+ * The inner component receives a guaranteed non-null `location` prop —
+ * every data request (radar frames, point weather, alerts), the marker and
+ * the recentre live exclusively there, so "no location ⇒ no request" is
+ * enforced by construction rather than by scattered guards. Tapping the map
+ * selects a new canonical location and re-queries everything.
  */
 export default function WeatherRadarView() {
   const { location, setLocation } = useLocation();
+  if (!hasRealLocation(location)) {
+    return <RadarNoLocation setLocation={setLocation} />;
+  }
+  return <RadarWithLocation location={location} setLocation={setLocation} />;
+}
+
+/**
+ * State A — no canonical location. Renders the basemap on a neutral world
+ * viewport (pixels only: never a weather query, never canonical state,
+ * never a user marker) with a truthful empty state. No radar frames, no
+ * point-weather reading, no alerts request, no location-specific centering.
+ * A map tap is always a real selection: it becomes the canonical location
+ * and the outer component swaps to the full radar.
+ */
+function RadarNoLocation({ setLocation }: { setLocation: SetLocationFn }) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const [tilesFailed, setTilesFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let map: any = null;
+    let ro: ResizeObserver | null = null;
+    (async () => {
+      const L = await import('leaflet');
+      if (cancelled || !mountRef.current) return;
+      map = L.map(mountRef.current, {
+        center: NEUTRAL_MAP_VIEWPORT,
+        zoom: NEUTRAL_MAP_ZOOM,
+      });
+      // Same working OSM basemap as the Weather Map; no CARTO / API key.
+      const tiles = L.tileLayer(OSM_TILE_URL, {
+        maxZoom: 19,
+        attribution: OSM_TILE_ATTR,
+      });
+      let tileErrors = 0;
+      tiles.on('tileerror', () => {
+        tileErrors += 1;
+        if (tileErrors >= 6) setTilesFailed(true);
+      });
+      tiles.addTo(map);
+      mapRef.current = map;
+
+      // The one way a no-location radar gains a location: an explicit tap.
+      map.on('click', (e: any) => {
+        const lat = e.latlng.lat as number;
+        const lon = e.latlng.lng as number;
+        void reverseGeocodeLabel(lat, lon).then((name) => {
+          setLocation(mapTapLocation(lat, lon, name));
+        });
+      });
+
+      requestAnimationFrame(() => map.invalidateSize());
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => map.invalidateSize());
+        ro.observe(mountRef.current);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (ro) ro.disconnect();
+      if (map) map.remove();
+      mapRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className={`map-view radar-view ${tilesFailed ? 'tiles-failed' : ''}`}>
+      <div className="radar-header">
+        <div className="radar-title-row">
+          <h1 className="radar-title">
+            <Radar aria-hidden />
+            Precipitation Radar
+          </h1>
+          <span className="radar-status">
+            <span className="radar-status-dot" />
+            No location
+          </span>
+        </div>
+        <div className="radar-sub">
+          Select a location or enable GPS to view radar · tap the map to choose a point
+        </div>
+      </div>
+
+      <div className="map-surface">
+        <div ref={mountRef} className="map-leaf" />
+        <div className="radar-empty">
+          <MapPin aria-hidden />
+          <div className="radar-empty-title">No location selected</div>
+          <div className="radar-empty-body">
+            Tap the map to choose where to check precipitation, or use the location pill. No
+            weather data is requested until a location exists.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * State B — a real canonical location drives everything. `location` is a
+ * guaranteed non-null prop: coordinates are authoritative for every request
+ * (radar frames, point weather, alerts) and for the map dot/recentre; the
+ * display name is presentation only.
+ */
+function RadarWithLocation({
+  location,
+  setLocation,
+}: {
+  location: SelectedLocation;
+  setLocation: SetLocationFn;
+}) {
   const mountRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
   const LRef = useRef<any>(null);
@@ -102,14 +249,17 @@ export default function WeatherRadarView() {
       const L = await import('leaflet');
       if (cancelled || !mountRef.current) return;
       LRef.current = L;
-      const lat = location.latitude;
-      const lon = location.longitude;
+      // Initial centre follows the canonical location; later movements are
+      // handled by the location-change effect below.
       map = L.map(mountRef.current, {
-        center: [lat, lon],
+        center: coordsOf(location),
         zoom: 7,
       });
       // Same working OSM basemap as the Weather Map; no CARTO / API key.
-      const tiles = L.tileLayer(OSM_TILE_URL, { maxZoom: 19, attribution: OSM_TILE_ATTR });
+      const tiles = L.tileLayer(OSM_TILE_URL, {
+        maxZoom: 19,
+        attribution: OSM_TILE_ATTR,
+      });
       let tileErrors = 0;
       tiles.on('tileerror', () => {
         tileErrors += 1;
@@ -121,15 +271,17 @@ export default function WeatherRadarView() {
 
       // Tapping the radar map selects the canonical location: the query dot
       // and the precipitation field move here, and the header, warnings,
-      // forecast and AI context follow the same coordinates (§16).
+      // forecast and AI context follow the same coordinates. A re-tap on the
+      // exact current coordinates is a no-op; any new coordinate is always a
+      // real selection.
       map.on('click', (e: any) => {
         const lat = e.latlng.lat as number;
         const lon = e.latlng.lng as number;
         void reverseGeocodeLabel(lat, lon).then((name) => {
           setLocation((prev) =>
-            prev.latitude === lat && prev.longitude === lon
-              ? { latitude: lat, longitude: lon, name, source: 'map' }
-              : {},
+            prev && prev.latitude === lat && prev.longitude === lon
+              ? {}
+              : mapTapLocation(lat, lon, name),
           );
         });
       });
@@ -154,14 +306,18 @@ export default function WeatherRadarView() {
   }, []);
 
   // Canonical location changes: move the dot, recentre, fetch the reading.
+  // `location` here is guaranteed non-null; the null case never mounts this
+  // component (the outer splits on it), so no stale place data can linger.
   useEffect(() => {
     const map = mapRef.current;
     const L = LRef.current;
     if (!map || !L) return;
+    const plan = planRadarRequests(location, ALERTS_ENDPOINT);
+    const [lat, lon] = coordsOf(location);
     if (dotRef.current) {
-      dotRef.current.setLatLng([location.latitude, location.longitude]);
+      dotRef.current.setLatLng([lat, lon]);
     } else {
-      dotRef.current = L.marker([location.latitude, location.longitude], {
+      dotRef.current = L.marker([lat, lon], {
         icon: L.divIcon({
           className: '',
           html: '<div class="map-loc-dot"></div>',
@@ -172,23 +328,27 @@ export default function WeatherRadarView() {
         zIndexOffset: 900,
       }).addTo(map);
     }
-    map.setView([location.latitude, location.longitude], Math.max(map.getZoom(), 7));
-    void fetchPointWeather(location.latitude, location.longitude)
+    map.setView([lat, lon], Math.max(map.getZoom(), 7));
+    void fetchPointWeather(plan.latitude, plan.longitude)
       .then((p) => setPointRain(p.precip != null ? p.precip.toFixed(1) : null))
       .catch(() => undefined);
   }, [location, ready]);
 
   // Forecast frames: now..+5 h model frames with real API timestamps.
+  // Coordinates come from the request plan; the cancelled flag drops a stale
+  // previous-location response so it can never overwrite the new location's
+  // frames.
   useEffect(() => {
     const L = LRef.current;
     const map = mapRef.current;
     if (!L || !map) return;
+    const plan = planRadarRequests(location, ALERTS_ENDPOINT);
     let cancelled = false;
     setLoading(true);
     setError(false);
     (async () => {
       try {
-        const res = await fetchRadarFrames(location.latitude, location.longitude);
+        const res = await fetchRadarFrames(plan.latitude, plan.longitude);
         if (cancelled || !mapRef.current) return;
         setFrames(res.frames);
         setFetchedAt(res.fetchedAt);
@@ -211,17 +371,12 @@ export default function WeatherRadarView() {
 
   // Active-warning line (text only: the backend provides localities and
   // severities, never polygon geometry - see docs/radar-data-capability.md).
+  // The URL comes from the request plan, so it is always coordinate-keyed.
   useEffect(() => {
     let cancelled = false;
     const ctrl = new AbortController();
-    void fetch(
-      ALERTS_ENDPOINT(location.name, {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        name: location.name,
-      }),
-      { signal: ctrl.signal },
-    )
+    const plan = planRadarRequests(location, ALERTS_ENDPOINT);
+    void fetch(plan.alertsUrl, { signal: ctrl.signal })
       .then((r) => r.json())
       .then((d: any) => {
         if (!cancelled && d?.success && Array.isArray(d.data?.alerts)) setAlerts(d.data.alerts);
@@ -231,7 +386,7 @@ export default function WeatherRadarView() {
       cancelled = true;
       ctrl.abort();
     };
-  }, [location.name]);
+  }, [location]);
 
   // Render the precipitation field for the active frame.
   useEffect(() => {

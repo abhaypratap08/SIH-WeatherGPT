@@ -152,7 +152,11 @@ export default function AIChatWorkspace({ lang = 'en' }: { lang?: 'en' | 'hi' })
               <div className="ai-chat-empty-mark" aria-hidden="true">
                 <CloudSun />
               </div>
-              <h2 className="ai-chat-greeting">Ask anything about the weather in {location.name}.</h2>
+              <h2 className="ai-chat-greeting">
+                {location
+                  ? `Ask anything about the weather in ${location.name}.`
+                  : 'Ask anything about the weather anywhere. Choose a location from the header pill, the Weather map, or the Weather report.'}
+              </h2>
 
               <div className="ai-chat-suggestion-grid">
                 {SUGGESTIONS.map((s) => {

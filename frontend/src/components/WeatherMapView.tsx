@@ -1,4 +1,4 @@
-import { CloudRain, Map as MapIcon, Thermometer, Wind } from 'lucide-react';
+import { CloudRain, Map as MapIcon, MapPin, Thermometer, Wind } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import 'leaflet/dist/leaflet.css';
 import './WeatherMap.css';
@@ -8,6 +8,8 @@ import {
   GridResult,
   LayerId,
   MEANINGFUL_RAIN,
+  NEUTRAL_MAP_VIEWPORT,
+  NEUTRAL_MAP_ZOOM,
   OSM_TILE_ATTR,
   OSM_TILE_URL,
   PointWeather,
@@ -131,11 +133,12 @@ export default function WeatherMapView() {
       const L = await import('leaflet');
       if (cancelled || !mountRef.current) return;
       LRef.current = L;
-      const lat = location.latitude;
-      const lon = location.longitude;
+      // No location → neutral world viewport (pixels only — never a weather
+      // query, never canonical state). The real selection drives the view
+      // through the location-change effect below (§no-location).
       map = L.map(mountRef.current, {
-        center: [lat, lon],
-        zoom: 8,
+        center: location ? [location.latitude, location.longitude] : NEUTRAL_MAP_VIEWPORT,
+        zoom: location ? 8 : NEUTRAL_MAP_ZOOM,
       });
       const tiles = L.tileLayer(OSM_TILE_URL, { maxZoom: 19, attribution: OSM_ATTR });
       let errors = 0;
@@ -154,10 +157,13 @@ export default function WeatherMapView() {
         const lat = e.latlng.lat as number;
         const lon = e.latlng.lng as number;
         void reverseGeocodeLabel(lat, lon).then((name) => {
+          // A tap is always a real selection — including the very first one
+          // (location === null → this tap becomes the only source). Only a
+          // re-tap on the exact current coordinates is a no-op.
           setLocation((prev) =>
-            prev.latitude === lat && prev.longitude === lon
-              ? { latitude: lat, longitude: lon, name, source: 'map' }
-              : {},
+            prev && prev.latitude === lat && prev.longitude === lon
+              ? {}
+              : { latitude: lat, longitude: lon, name, source: 'map' },
           );
         });
       });
@@ -186,10 +192,32 @@ export default function WeatherMapView() {
   }, []);
 
   // Canonical location changes: move the dot, recentre, refresh the reading.
+  // location === null → drop every location-bound artifact (dot, rings,
+  // point reading, grid, field) and park the map on the neutral viewport:
+  // no stale place data may linger after the location is cleared (§no-location).
   useEffect(() => {
     const map = mapRef.current;
     const L = LRef.current;
     if (!map || !L) return;
+    if (!location) {
+      if (dotRef.current) {
+        dotRef.current.remove();
+        dotRef.current = null;
+      }
+      if (cellRef.current) {
+        cellRef.current.clearLayers();
+        cellRef.current.remove();
+        cellRef.current = null;
+      }
+      heatLayerRef.current?.clear();
+      setPoint(null);
+      setReadingPos(null);
+      setGrid(null);
+      setLayerError(false);
+      setLayerLoading(false);
+      map.setView(NEUTRAL_MAP_VIEWPORT as [number, number], NEUTRAL_MAP_ZOOM);
+      return;
+    }
     if (dotRef.current) {
       dotRef.current.setLatLng([location.latitude, location.longitude]);
     } else {
@@ -213,7 +241,7 @@ export default function WeatherMapView() {
   // Keep the reading tag pinned above the location dot.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !location) return;
     const update = () => {
       const pt = map.latLngToContainerPoint([location.latitude, location.longitude]);
       setReadingPos({ x: pt.x, y: pt.y });
@@ -229,7 +257,7 @@ export default function WeatherMapView() {
   useEffect(() => {
     const L = LRef.current;
     const map = mapRef.current;
-    if (!L || !map) return;
+    if (!L || !map || !location) return;
     if (cellRef.current) {
       cellRef.current.clearLayers();
       cellRef.current.remove();
@@ -299,9 +327,10 @@ export default function WeatherMapView() {
 
   const activeLabel = LAYERS.find((l) => l.id === layer)?.label ?? 'layer';
   const legend = legendFor(layer, grid);
-  const coords =
-    `${Math.abs(location.latitude).toFixed(4)}° ${location.latitude >= 0 ? 'N' : 'S'}, ` +
-    `${Math.abs(location.longitude).toFixed(4)}° ${location.longitude >= 0 ? 'E' : 'W'}`;
+  const coords = location
+    ? `${Math.abs(location.latitude).toFixed(4)}° ${location.latitude >= 0 ? 'N' : 'S'}, ` +
+      `${Math.abs(location.longitude).toFixed(4)}° ${location.longitude >= 0 ? 'E' : 'W'}`
+    : 'No location selected';
 
   return (
     <div className={`map-view ${tilesFailed ? 'tiles-failed' : ''}`}>
@@ -322,6 +351,17 @@ export default function WeatherMapView() {
       </div>
       <div className="map-surface">
         <div ref={mountRef} className="map-leaf" />
+        {!location && (
+          <div className="weather-empty">
+            <MapPin aria-hidden />
+            <div className="weather-empty-title">No location selected</div>
+            <div className="weather-empty-body">
+              Tap the map to choose where to check the weather, search a city on the Weather
+              report page, or enable GPS from the header pill. No weather data is requested until
+              a location exists.
+            </div>
+          </div>
+        )}
         {layerLoading && <div className="map-loading">Loading {activeLabel.toLowerCase()} layer…</div>}
         {layerError && (
           <div className="map-layer-error">
