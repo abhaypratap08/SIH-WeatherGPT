@@ -28,7 +28,10 @@ import {
   ADVISORIES_ENDPOINT,
   ALERTS_ENDPOINT,
   CLIMATE_ENDPOINT,
+  FetchDiagnosticError,
+  fetchWithDiagnostics,
   ML_ROUTE_ENDPOINT,
+  truncateForDiagnostics,
   WEATHER_ENDPOINTS,
 } from './config/api';
 import { useTheme } from './hooks/useTheme';
@@ -237,6 +240,21 @@ async function describeHttpError(res: Response): Promise<string> {
     /* non-JSON error body — status/statusText is enough */
   }
   return `HTTP ${res.status} ${res.statusText ?? ''}${detail}`.trim();
+}
+
+/**
+ * Extract the backend's user-safe ApiResponse `message` from an already-read
+ * response body, without echoing the raw body. Returns null when the body is
+ * not the JSON envelope.
+ */
+function readApiResponseMessage(text: string): string | null {
+  try {
+    const body = JSON.parse(text);
+    if (body && typeof body.message === 'string' && body.message) return body.message;
+  } catch {
+    /* non-JSON body */
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -706,18 +724,66 @@ export default function App() {
   const fetchWeather = async (city: string, signal: AbortSignal) => {
     setForecastLoading(true);
     setForecastError(null);
+    const url = WEATHER_ENDPOINTS.FORECAST(city, 7);
     try {
-      const url = WEATHER_ENDPOINTS.FORECAST(city, 7);
-      const f = await fetch(url, { signal });
-      if (!f.ok) throw new Error(await describeHttpError(f));
-      const fd = await f.json();
-      if (!fd?.success) throw new Error(fd?.message ?? 'Backend returned success:false');
-      if (!Array.isArray(fd.data?.days) || fd.data.days.length === 0) throw new Error('No forecast days returned');
+      const f = await fetchWithDiagnostics(url, { signal });
+      // Read the raw body once so error diagnostics and JSON parsing share it
+      // (the backend may answer 5xx with a non-JSON error page).
+      const responseText = await f.text();
+      if (!f.ok) {
+        const apiMessage = readApiResponseMessage(responseText);
+        throw new FetchDiagnosticError({
+          kind: 'http',
+          url,
+          status: f.status,
+          statusText: f.statusText,
+          bodyText: truncateForDiagnostics(responseText),
+          message:
+            apiMessage ?? `HTTP ${f.status}${f.statusText ? ' ' + f.statusText : ''}`,
+        });
+      }
+      let fd: any;
+      try {
+        fd = JSON.parse(responseText);
+      } catch {
+        throw new FetchDiagnosticError({
+          kind: 'invalid-response',
+          url,
+          bodyText: truncateForDiagnostics(responseText),
+          message: 'Weather service returned an unreadable response.',
+        });
+      }
+      if (!fd?.success) throw new FetchDiagnosticError({
+        kind: 'invalid-response',
+        url,
+        bodyText: truncateForDiagnostics(responseText),
+        message: fd?.message ?? 'Backend returned success:false',
+      });
+      if (!Array.isArray(fd.data?.days) || fd.data.days.length === 0) throw new FetchDiagnosticError({
+        kind: 'invalid-response',
+        url,
+        bodyText: truncateForDiagnostics(responseText),
+        message: 'No forecast days returned',
+      });
       setForecastList(fd.data.days);
     } catch (e) {
       if (e instanceof Error && e.name === 'AbortError') return;
-      console.warn('[Forecast] request failed:', e);
-      setForecastError(e instanceof Error ? e.message : String(e));
+      const diagnostic = e instanceof FetchDiagnosticError ? e : null;
+      console.error('[Forecast] request failed', {
+        url,
+        kind: diagnostic?.kind ?? 'unknown',
+        status: diagnostic?.status,
+        statusText: diagnostic?.statusText,
+        bodyText: diagnostic?.bodyText,
+        cause: diagnostic?.cause ?? e,
+      });
+      setForecastError(
+        diagnostic
+          ? diagnostic.toDisplayMessage()
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
     } finally {
       if (!signal.aborted) setForecastLoading(false);
     }
