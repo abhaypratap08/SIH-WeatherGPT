@@ -4,6 +4,7 @@ import com.weathergpt.dto.ApiResponse;
 import com.weathergpt.dto.alert.AlertResponse;
 import com.weathergpt.dto.alert.WeatherAlertDto;
 import com.weathergpt.weather.alert.ImdEarlyWarningService;
+import com.weathergpt.weather.model.GeoLocation;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -30,7 +31,16 @@ public class AlertStreamController {
 
     @GetMapping("/early-warnings")
     public ResponseEntity<ApiResponse<AlertResponse>> getEarlyWarnings(
-            @RequestParam(required = false) String location) {
+            @RequestParam(required = false) String location,
+            @RequestParam(required = false) Double latitude,
+            @RequestParam(required = false) Double longitude,
+            @RequestParam(required = false) String name) {
+        if (latitude != null && longitude != null) {
+            // Coordinate path: no geocoding; the display label is presentation-only.
+            AlertResponse geoResponse = earlyWarningService.getEarlyWarningsForLocation(
+                    GeoLocation.fromCoordinates(name, latitude, longitude));
+            return ResponseEntity.ok(ApiResponse.success("IMD early warnings retrieved", geoResponse));
+        }
         if (location == null || location.isBlank()) {
             throw new IllegalArgumentException("Location is required for early warnings query");
         }

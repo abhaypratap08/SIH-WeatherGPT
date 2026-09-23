@@ -33,6 +33,7 @@ import {
   ML_ROUTE_ENDPOINT,
   truncateForDiagnostics,
   WEATHER_ENDPOINTS,
+  type WeatherQueryCoords,
 } from './config/api';
 import { useTheme } from './hooks/useTheme';
 import { reverseGeocodeLabel, useLocation } from './location/LocationContext';
@@ -255,6 +256,20 @@ function readApiResponseMessage(text: string): string | null {
     /* non-JSON body */
   }
   return null;
+}
+
+/**
+ * Build the coordinate + display-label query for backend weather requests.
+ * The canonical location's name is a DISPLAY LABEL (it can be a reverse-
+ * geocoded POI such as "16th Park View(GYC)"), so coordinates are the
+ * authoritative query while the name travels along purely for presentation.
+ */
+function toWeatherQuery(loc: {
+  name: string;
+  latitude: number;
+  longitude: number;
+}): WeatherQueryCoords {
+  return { latitude: loc.latitude, longitude: loc.longitude, name: loc.name };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -696,10 +711,10 @@ export default function App() {
     if (!activePage) return;
     const ctrl = new AbortController();
     const { signal } = ctrl;
-    if (activePage === 'forecast') void fetchWeather(location.name, signal);
-    if (activePage === 'nwp') void fetchNwp(location.name, signal);
-    if (activePage === 'climate') void fetchClimate(location.name, signal);
-    if (activePage === 'sectors') void fetchSector(location.name, activeSector, signal);
+    if (activePage === 'forecast') void fetchWeather(location, signal);
+    if (activePage === 'nwp') void fetchNwp(location, signal);
+    if (activePage === 'climate') void fetchClimate(location, signal);
+    if (activePage === 'sectors') void fetchSector(location, activeSector, signal);
     return () => ctrl.abort();
   }, [activePage, location.name, locationKey, activeSector]);
 
@@ -708,23 +723,26 @@ export default function App() {
   const retryFetch = (kind: 'forecast' | 'nwp' | 'climate' | 'sector') => {
     const ctrl = new AbortController();
     const { signal } = ctrl;
-    if (kind === 'forecast') void fetchWeather(location.name, signal);
-    else if (kind === 'nwp') void fetchNwp(location.name, signal);
-    else if (kind === 'climate') void fetchClimate(location.name, signal);
-    else if (kind === 'sector') void fetchSector(location.name, activeSector, signal);
+    if (kind === 'forecast') void fetchWeather(location, signal);
+    else if (kind === 'nwp') void fetchNwp(location, signal);
+    else if (kind === 'climate') void fetchClimate(location, signal);
+    else if (kind === 'sector') void fetchSector(location, activeSector, signal);
   };
 
   // Alerts are always fetched — the warning bulletin above the chat needs them.
   useEffect(() => {
     const ctrl = new AbortController();
-    void fetchAlerts(location.name, ctrl.signal);
+    void fetchAlerts(location, ctrl.signal);
     return () => ctrl.abort();
   }, [location.name]);
 
-  const fetchWeather = async (city: string, signal: AbortSignal) => {
+  const fetchWeather = async (
+    loc: { name: string; latitude: number; longitude: number },
+    signal: AbortSignal,
+  ) => {
     setForecastLoading(true);
     setForecastError(null);
-    const url = WEATHER_ENDPOINTS.FORECAST(city, 7);
+    const url = WEATHER_ENDPOINTS.FORECAST(loc.name, 7, toWeatherQuery(loc));
     try {
       const f = await fetchWithDiagnostics(url, { signal });
       // Read the raw body once so error diagnostics and JSON parsing share it
@@ -788,11 +806,11 @@ export default function App() {
       if (!signal.aborted) setForecastLoading(false);
     }
   };
-  const fetchNwp = async (city: string, signal: AbortSignal) => {
+  const fetchNwp = async (loc: { name: string; latitude: number; longitude: number }, signal: AbortSignal) => {
     setNwpLoading(true);
     setNwpError(null);
     try {
-      const url = WEATHER_ENDPOINTS.NWP(city);
+      const url = WEATHER_ENDPOINTS.NWP(loc.name, toWeatherQuery(loc));
       const r = await fetch(url, { signal });
       if (!r.ok) throw new Error(await describeHttpError(r));
       const d = await r.json();
@@ -809,11 +827,15 @@ export default function App() {
       if (!signal.aborted) setNwpLoading(false);
     }
   };
-  const fetchSector = async (city: string, sector: string, signal: AbortSignal) => {
+  const fetchSector = async (
+    loc: { name: string; latitude: number; longitude: number },
+    sector: string,
+    signal: AbortSignal,
+  ) => {
     setSectorLoading(true);
     setSectorError(null);
     try {
-      const r = await fetch(ADVISORIES_ENDPOINT(city, sector), { signal });
+      const r = await fetch(ADVISORIES_ENDPOINT(loc.name, sector, toWeatherQuery(loc)), { signal });
       if (!r.ok) throw new Error(await describeHttpError(r));
       const d = await r.json();
       if (!d?.success) throw new Error(d?.message ?? 'Backend returned success:false');
@@ -827,9 +849,12 @@ export default function App() {
       if (!signal.aborted) setSectorLoading(false);
     }
   };
-  const fetchAlerts = async (city: string, signal: AbortSignal) => {
+  const fetchAlerts = async (
+    loc: { name: string; latitude: number; longitude: number },
+    signal: AbortSignal,
+  ) => {
     try {
-      const r = await fetch(ALERTS_ENDPOINT(city), { signal });
+      const r = await fetch(ALERTS_ENDPOINT(loc.name, toWeatherQuery(loc)), { signal });
       if (!r.ok) throw new Error(await describeHttpError(r));
       const d = await r.json();
       if (d?.success && Array.isArray(d.data?.alerts)) setAlertsList(d.data.alerts);
@@ -839,11 +864,14 @@ export default function App() {
       // No blocking UI state: an absent warning bulletin is the safe default.
     }
   };
-  const fetchClimate = async (city: string, signal: AbortSignal) => {
+  const fetchClimate = async (
+    loc: { name: string; latitude: number; longitude: number },
+    signal: AbortSignal,
+  ) => {
     setClimateLoading(true);
     setClimateError(null);
     try {
-      const url = CLIMATE_ENDPOINT(city);
+      const url = CLIMATE_ENDPOINT(loc.name, 2015, 2024, toWeatherQuery(loc));
       const r = await fetch(url, { signal });
       if (!r.ok) throw new Error(await describeHttpError(r));
       const d = await r.json();

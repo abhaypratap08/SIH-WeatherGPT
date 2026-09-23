@@ -214,7 +214,14 @@ export default function WeatherRadarView() {
   useEffect(() => {
     let cancelled = false;
     const ctrl = new AbortController();
-    void fetch(ALERTS_ENDPOINT(location.name), { signal: ctrl.signal })
+    void fetch(
+      ALERTS_ENDPOINT(location.name, {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        name: location.name,
+      }),
+      { signal: ctrl.signal },
+    )
       .then((r) => r.json())
       .then((d: any) => {
         if (!cancelled && d?.success && Array.isArray(d.data?.alerts)) setAlerts(d.data.alerts);

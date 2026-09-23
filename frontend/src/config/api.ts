@@ -19,37 +19,79 @@ export const ML_API_BASE =
 
 // ── Java backend endpoints ──────────────────────────────────────────
 
+/**
+ * Coordinates plus a display label, used for weather queries.
+ *
+ * Coordinates are the AUTHORITATIVE way to ask the backend for weather: a
+ * display label may be a reverse-geocoded POI (e.g. "16th Park View(GYC)",
+ * "Selected point") that Open-Meteo geocoding cannot resolve, so the name is
+ * strictly presentation-only and is sent alongside — never instead of — the
+ * coordinate pair.
+ */
+export interface WeatherQueryCoords {
+  latitude: number;
+  longitude: number;
+  name?: string;
+}
+
+/**
+ * Build the location query for a Java backend endpoint: coordinates (with an
+ * optional display `name`) take precedence; otherwise the human-readable
+ * location string is sent as `location=` for backward-compatible geocoding.
+ */
+function encodeLocationQuery(
+  location: string,
+  coords?: WeatherQueryCoords,
+): string {
+  if (coords) {
+    const params = new URLSearchParams();
+    params.set('latitude', String(coords.latitude));
+    params.set('longitude', String(coords.longitude));
+    if (coords.name && coords.name.trim()) params.set('name', coords.name.trim());
+    return params.toString();
+  }
+  return `location=${encodeURIComponent(location)}`;
+}
+
 export const WEATHER_ENDPOINTS = {
-  CURRENT: (location: string) =>
-    `${JAVA_API_BASE}/api/weather/current?location=${encodeURIComponent(location)}`,
+  CURRENT: (location: string, coords?: WeatherQueryCoords) =>
+    `${JAVA_API_BASE}/api/weather/current?${encodeLocationQuery(location, coords)}`,
 
-  FORECAST: (location: string, days = 7) =>
-    `${JAVA_API_BASE}/api/weather/forecast?location=${encodeURIComponent(location)}&days=${days}`,
+  FORECAST: (location: string, days = 7, coords?: WeatherQueryCoords) =>
+    `${JAVA_API_BASE}/api/weather/forecast?${encodeLocationQuery(location, coords)}&days=${days}`,
 
-  NWP: (location: string) =>
-    `${JAVA_API_BASE}/api/weather/nwp?location=${encodeURIComponent(location)}`,
+  NWP: (location: string, coords?: WeatherQueryCoords) =>
+    `${JAVA_API_BASE}/api/weather/nwp?${encodeLocationQuery(location, coords)}`,
 };
 
 export const ADVISORIES_ENDPOINT = (
   location: string,
   sector: string,
+  coords?: WeatherQueryCoords,
 ) =>
-  `${JAVA_API_BASE}/api/weather/advisories?location=${encodeURIComponent(
+  `${JAVA_API_BASE}/api/weather/advisories?${encodeLocationQuery(
     location,
+    coords,
   )}&sector=${encodeURIComponent(sector)}`;
 
-export const ALERTS_ENDPOINT = (location: string) =>
-  `${JAVA_API_BASE}/api/alerts/early-warnings?location=${encodeURIComponent(
+export const ALERTS_ENDPOINT = (
+  location: string,
+  coords?: WeatherQueryCoords,
+) =>
+  `${JAVA_API_BASE}/api/alerts/early-warnings?${encodeLocationQuery(
     location,
+    coords,
   )}`;
 
 export const CLIMATE_ENDPOINT = (
   location: string,
   startYear = 2015,
   endYear = 2024,
+  coords?: WeatherQueryCoords,
 ) =>
-  `${JAVA_API_BASE}/api/weather/climate?location=${encodeURIComponent(
+  `${JAVA_API_BASE}/api/weather/climate?${encodeLocationQuery(
     location,
+    coords,
   )}&startYear=${startYear}&endYear=${endYear}`;
 
 // ── Python ML backend endpoints ─────────────────────────────────────
