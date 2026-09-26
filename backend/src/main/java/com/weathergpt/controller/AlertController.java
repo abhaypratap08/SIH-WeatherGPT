@@ -3,6 +3,7 @@ package com.weathergpt.controller;
 import com.weathergpt.dto.ApiResponse;
 import com.weathergpt.dto.alert.AlertResponse;
 import com.weathergpt.service.AlertService;
+import com.weathergpt.weather.model.GeoLocation;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,14 +35,27 @@ public class AlertController {
      * <pre>
      * GET /api/alerts?location=Delhi
      * GET /api/alerts?location=Mumbai
+     * GET /api/alerts?latitude=28.65&longitude=77.23&name=16th%20Park%20View(GYC)
      * </pre>
      *
-     * @param location human-readable location string (required)
+     * @param location    human-readable location string (geocoded when
+     *                    coordinates are absent — backwards compatible)
+     * @param latitude    authoritative coordinate when provided alongside longitude
+     * @param longitude   authoritative coordinate when provided alongside latitude
+     * @param name        display-only label used with coordinates (never geocoded)
      * @return normalized alert response with providerStatus and officialProviderActive flags
      */
     @GetMapping
     public ResponseEntity<ApiResponse<AlertResponse>> getAlerts(
-            @RequestParam(required = false) String location) {
+            @RequestParam(required = false) String location,
+            @RequestParam(required = false) Double latitude,
+            @RequestParam(required = false) Double longitude,
+            @RequestParam(required = false) String name) {
+        if (latitude != null && longitude != null) {
+            AlertResponse geoResponse = alertService.getAlertsForLocation(
+                    GeoLocation.fromCoordinates(name, latitude, longitude));
+            return ResponseEntity.ok(ApiResponse.success("Alerts retrieved", geoResponse));
+        }
         validateLocation(location);
         AlertResponse alertResponse = alertService.getAlerts(location);
         return ResponseEntity.ok(ApiResponse.success("Alerts retrieved", alertResponse));

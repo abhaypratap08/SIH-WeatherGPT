@@ -24,3 +24,9 @@ backend/uploads/
 ML/sample_resume-2.pdf
 .vercel
 .env*
+
+# Local AI tooling: fetched documentation and language-server caches
+.cache/ai-context/
+.serena/cache/
+.serena/project.local.yml
+.serena/memories/
