@@ -15,7 +15,7 @@ export const JAVA_API_BASE =
   "https://sih-weathergpt-production.up.railway.app";
 
 export const ML_API_BASE =
-  "https://bubbly-abundance-production-4c2a.up.railway.app";
+  "http://localhost:8000";
 
 // ── Java backend endpoints ──────────────────────────────────────────
 

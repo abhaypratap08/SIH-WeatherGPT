@@ -137,6 +137,13 @@ public class VoiceController {
                 .message(effectiveMessage)
                 .audio(effectiveAudio)
                 .audioContentType(effectiveContentType)
+                // Keep conversational context flowing through both paths:
+                // language, sector, session memory and the selected location.
+                // (Previously these were silently dropped on the unified path.)
+                .language(body != null ? body.getLanguage() : null)
+                .sector(body != null ? body.getSector() : null)
+                .sessionId(body != null ? body.getSessionId() : null)
+                .location(body != null ? body.getLocation() : null)
                 .build();
     }
 }
