@@ -83,8 +83,27 @@ public class LlmQueryUnderstandingService {
             log.info("Restored location '{}' from session {}", locationStr, sessionId);
         }
 
+        // The client's currently selected location (sent with every chat
+        // request) becomes the AI's weather context before any fixed default:
+        // the answer, advisories, NWP/climate queries and warnings all follow
+        // the location the user picked in the app.
+        if ((locationStr == null || locationStr.isBlank())
+                && request.getLocation() != null && !request.getLocation().isBlank()) {
+            locationStr = request.getLocation();
+            log.info("Using selected location '{}' from request context", locationStr);
+        }
+
         if (locationStr == null || locationStr.isBlank()) {
-            locationStr = "Delhi"; // Default reference point if unstated
+            // No location available anywhere (message, session memory or
+            // request context): never fabricate coordinates or guess a default
+            // city — ask the user to name a place (docs/location-architecture.md).
+            return ChatResponse.builder()
+                    .answer("Please specify the location for which you want weather information. "
+                            + "For example: \"What's the weather in Delhi?\"")
+                    .intent(WeatherIntent.GENERAL_WEATHER)
+                    .timeReference(TimeReference.TODAY)
+                    .language(lang)
+                    .build();
         }
 
         if (sessionId != null) {
@@ -95,7 +114,17 @@ public class LlmQueryUnderstandingService {
         try {
             location = weatherService.resolveLocation(locationStr);
         } catch (Exception e) {
-            location = GeoLocation.builder().name(locationStr).latitude(28.61).longitude(77.20).country("India").build();
+            // The named place could not be geocoded — answer truthfully instead
+            // of inventing coordinates.
+            log.warn("Could not resolve location '{}' for specialized query: {}",
+                    locationStr, e.getMessage());
+            return ChatResponse.builder()
+                    .answer("I couldn't find \"" + locationStr
+                            + "\". Please check the spelling or name a different place.")
+                    .intent(WeatherIntent.GENERAL_WEATHER)
+                    .timeReference(TimeReference.TODAY)
+                    .language(lang)
+                    .build();
         }
 
         // 1. Check for Sector-Specific Decision Support

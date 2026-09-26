@@ -1,4 +1,4 @@
-import { CloudRain, Map as MapIcon, MapPin, Thermometer, Wind } from 'lucide-react';
+import { CloudRain, Map as MapIcon, MapPin, Thermometer, Wind, Activity } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import 'leaflet/dist/leaflet.css';
 import './WeatherMap.css';
@@ -6,7 +6,6 @@ import { reverseGeocodeLabel, useLocation } from '../location/LocationContext';
 import { WeatherField } from './weatherField';
 import {
   GridResult,
-  LayerId,
   MEANINGFUL_RAIN,
   NEUTRAL_MAP_VIEWPORT,
   NEUTRAL_MAP_ZOOM,
@@ -17,19 +16,34 @@ import {
   fetchGrid,
   fetchPointWeather,
   fieldGradient,
+  windColor,
   windStyle,
 } from './mapData';
+import { buildWindStreamlines, type Streamline } from './windStreamlines';
 
 const QUERY_RINGS_KM = [25, 50, 75];
 
 const OSM_ATTR = OSM_TILE_ATTR;
 
+// Overview = combined low-intensity view; Temperature/Precipitation/Wind = focus modes
+// Radar = real reflectivity composite from RainViewer (global radar mosaic)
+type LayerId = 'standard' | 'temperature' | 'precipitation' | 'wind' | 'radar';
+
 const LAYERS: { id: LayerId; label: string; Icon: typeof MapIcon }[] = [
-  { id: 'standard', label: 'Standard', Icon: MapIcon },
+  { id: 'standard', label: 'Overview', Icon: MapIcon },
   { id: 'temperature', label: 'Temperature', Icon: Thermometer },
   { id: 'precipitation', label: 'Rain', Icon: CloudRain },
   { id: 'wind', label: 'Wind', Icon: Wind },
+  { id: 'radar', label: 'Radar', Icon: Activity },
 ];
+
+// Overview mode intensity multipliers (applied to field opacity / wind arrow opacity)
+const OVERVIEW_INTENSITY = {
+  temperature: 0.45,  // ~half of full intensity (full is ~0.5 core alpha)
+  precipitation: 0.45,
+  wind: 0.4,          // wind arrows at 40% opacity, same density
+  windDensity: 0.5,   // render ~50% of wind arrows in overview
+};
 
 interface LegendSpec {
   title: string;
@@ -39,7 +53,7 @@ interface LegendSpec {
 }
 
 function legendFor(layer: LayerId, grid: GridResult | null): LegendSpec | null {
-  if (layer === 'standard' || !grid) return null;
+  if (layer === 'standard' || layer === 'radar' || !grid) return null;
   if (layer === 'temperature') {
     return {
       title: 'Temperature',
@@ -112,7 +126,10 @@ export default function WeatherMapView() {
   const LRef = useRef<any>(null);
   const dotRef = useRef<any>(null);
   const cellRef = useRef<any>(null);
-  const heatLayerRef = useRef<WeatherField | null>(null);
+  // Three separate field layers for cross-fade transitions
+  const tempFieldRef = useRef<WeatherField | null>(null);
+  const precipFieldRef = useRef<WeatherField | null>(null);
+  const windLayerRef = useRef<any>(null); // L.layerGroup for wind arrows
   const [ready, setReady] = useState(false);
   const [layer, setLayer] = useState<LayerId>('standard');
   const [grid, setGrid] = useState<GridResult | null>(null);
@@ -122,7 +139,73 @@ export default function WeatherMapView() {
   const [layerLoading, setLayerLoading] = useState(false);
   const [layerError, setLayerError] = useState(false);
   const [readingPos, setReadingPos] = useState<{ x: number; y: number } | null>(null);
+  // Wind streamlines: traced paths through the wind vector field, re-seeded on
+  // pan/zoom so coverage stays reasonable at any zoom level.
+  const [streamlines, setStreamlines] = useState<Streamline[]>([]);
+  // Container pixel size the streamline paths were traced against; the SVG
+  // viewBox is re-synced on pan/zoom/resize so paths stay aligned.
+  const [mapW, setMapW] = useState(0);
+  const [mapH, setMapH] = useState(0);
+  // Latest grid + active layer, read by the pan/zoom re-seed handler without
+  // re-subscribing the map listener on every layer change.
+  const gridRef = useRef<GridResult | null>(null);
+  const layerRef = useRef<LayerId>('standard');
+  // Pan/zoom handler plus the latest reseed function, held in refs so the map
+  // listener is attached exactly once (mount) and never re-subscribes.
+  const mapReSeedRef = useRef<(() => void) | null>(null);
+  const reseedStreamlinesRef = useRef<
+    ((map: any, grid: GridResult, layer: LayerId) => void) | null
+  >(null);
+  // RainViewer radar state
+  const radarTileLayerRef = useRef<any>(null);
+  const [radarFrames, setRadarFrames] = useState<Array<{ time: number; path: string }>>([]);
+  const [radarFrameIndex, setRadarFrameIndex] = useState(0);
+  const [radarHost, setRadarHost] = useState<string>('');
+  const [radarLoading, setRadarLoading] = useState(false);
+  const [radarError, setRadarError] = useState<string | null>(null);
   const reading = readingText(layer, point);
+
+  /**
+   * Trace (or re-trace) the wind streamline field for the current viewport.
+   * Called on layer change and on every pan/zoom/resize: the SVG paths live in
+   * container pixel space, so they must be regenerated whenever that space
+   * changes or they drift out of alignment with the basemap.
+   */
+  const reseedStreamlines = (map: any, grid: GridResult, activeLayer: LayerId) => {
+    const wantWind = activeLayer === 'standard' || activeLayer === 'wind';
+    if (!wantWind) {
+      setStreamlines([]);
+      setMapW(0);
+      setMapH(0);
+      return;
+    }
+    const size = map.getSize();
+    if (!size || size.x <= 0 || size.y <= 0) {
+      setStreamlines([]);
+      setMapW(0);
+      setMapH(0);
+      return;
+    }
+    const lines = buildWindStreamlines(
+      grid.points,
+      (x, y) => {
+        const ll = map.containerPointToLatLng([x, y]);
+        return [ll.lat, ll.lng] as [number, number];
+      },
+      [0, 0, size.x, size.y],
+      grid.maxWind,
+      windColor,
+      windStyle,
+      activeLayer === 'standard',
+    );
+    setStreamlines(lines);
+    setMapW(size.x);
+    setMapH(size.y);
+  };
+  // Publish the latest reseed function + active layer for the mount-time
+  // pan/zoom handler to call without re-subscribing the map listener.
+  reseedStreamlinesRef.current = reseedStreamlines;
+  layerRef.current = layer;
 
   // One-shot map initialisation.
   useEffect(() => {
@@ -176,11 +259,36 @@ export default function WeatherMapView() {
         ro = new ResizeObserver(() => map.invalidateSize());
         ro.observe(mountRef.current);
       }
+      // Re-seed the wind field on any pan/zoom/resize so streamline coverage
+      // stays reasonable at every zoom level instead of stretching or bunching.
+      const re = () => {
+        if (cancelled) return;
+        if (!gridRef.current) return;
+        const size = map.getSize();
+        if (size.x > 0 && size.y > 0) {
+          setMapW(size.x);
+          setMapH(size.y);
+        }
+        reseedStreamlinesRef.current?.(map, gridRef.current, layerRef.current);
+      };
+      map.on('moveend zoomend resize', re);
+      mapReSeedRef.current = re;
     })();
     return () => {
       cancelled = true;
-      heatLayerRef.current?.dispose();
-      heatLayerRef.current = null;
+      const map0 = mapRef.current;
+      if (map0 && mapReSeedRef.current) {
+        map0.off('moveend zoomend resize', mapReSeedRef.current);
+      }
+      mapReSeedRef.current = null;
+      tempFieldRef.current?.dispose();
+      tempFieldRef.current = null;
+      precipFieldRef.current?.dispose();
+      precipFieldRef.current = null;
+      if (windLayerRef.current) {
+        map?.removeLayer(windLayerRef.current);
+        windLayerRef.current = null;
+      }
       if (ro) ro.disconnect();
       if (map) map.remove();
       mapRef.current = null;
@@ -189,6 +297,35 @@ export default function WeatherMapView() {
     };
     // location is captured at mount; live updates come from the effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch RainViewer radar metadata (host + past frames) on mount
+  useEffect(() => {
+    let cancelled = false;
+    setRadarLoading(true);
+    setRadarError(null);
+    fetch('https://api.rainviewer.com/public/weather-maps.json')
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data.host && data.radar?.past?.length) {
+          setRadarHost(data.host);
+          setRadarFrames(data.radar.past);
+          setRadarFrameIndex(data.radar.past.length - 1); // start at latest
+        } else {
+          setRadarError('No radar frames available');
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setRadarError(e.message || 'Failed to load radar metadata');
+      })
+      .finally(() => {
+        if (!cancelled) setRadarLoading(false);
+      });
+    return () => { cancelled = true; };
   }, []);
 
   // Canonical location changes: move the dot, recentre, refresh the reading.
@@ -209,7 +346,13 @@ export default function WeatherMapView() {
         cellRef.current.remove();
         cellRef.current = null;
       }
-      heatLayerRef.current?.clear();
+      tempFieldRef.current?.clear();
+      precipFieldRef.current?.clear();
+      if (windLayerRef.current) {
+        windLayerRef.current.clearLayers();
+        map.removeLayer(windLayerRef.current);
+        windLayerRef.current = null;
+      }
       setPoint(null);
       setReadingPos(null);
       setGrid(null);
@@ -253,64 +396,94 @@ export default function WeatherMapView() {
     };
   }, [location, reading]);
 
-  // Render the active data layer from the (cached) grid.
+  // Render data layers with cross-fade transitions between overview and focus modes
   useEffect(() => {
     const L = LRef.current;
     const map = mapRef.current;
     if (!L || !map || !location) return;
-    if (cellRef.current) {
-      cellRef.current.clearLayers();
-      cellRef.current.remove();
-      cellRef.current = null;
-    }
-    // Standard and wind have no colour field; take the soft overlay down.
-    if (layer !== 'temperature' && layer !== 'precipitation') {
-      heatLayerRef.current?.clear();
-    }
-    if (layer === 'standard') return;
+
     let cancelled = false;
     setLayerLoading(true);
     setLayerError(false);
+
     (async () => {
       try {
         const g = await fetchGrid(location.latitude, location.longitude);
         if (cancelled || !mapRef.current) return;
         setGrid(g);
         setGridAt(Date.now());
-        if (!heatLayerRef.current) heatLayerRef.current = new WeatherField(map);
+        gridRef.current = g;
+
         const rings = { lat: location.latitude, lon: location.longitude, radiiKm: QUERY_RINGS_KM };
-        if (layer === 'temperature' || layer === 'precipitation') {
-          // Weather Map Rain honours the same truth gate as Radar: an area
-          // with no meaningful rainfall shows no coloured field at all.
-          const dry = layer === 'precipitation' && g.maxRain <= MEANINGFUL_RAIN;
-          heatLayerRef.current.set({ points: g.points, mode: layer, field: !dry, rings });
-        } else {
-          // Wind draws its own arrows; the field is re-used for the query
-          // rings only (concentric contours around the anchor point).
-          heatLayerRef.current.set({ points: g.points, mode: 'precipitation', field: false, rings });
-          const grp = L.layerGroup();
-          for (const p of g.points) {
-            const ws = windStyle(p.windSpeed, g.maxWind);
-            const html =
-              `<div class="wind-arrow" style="transform:rotate(${Math.round(p.windDir)}deg)">` +
-              `<svg width="${ws.size}" height="${ws.size}" viewBox="0 0 24 24" fill="none">` +
-              `<path class="shaft" d="M12 20 V7.5" stroke="${ws.color}" stroke-width="2" stroke-linecap="round" opacity="${ws.opacity}"/>` +
-              `<path d="M12 4.5 L8.4 10.5 L15.6 10.5 Z" fill="${ws.color}" opacity="${ws.opacity}"/>` +
-              `</svg></div>`;
-            L.marker([p.lat, p.lon], {
-              icon: L.divIcon({
-                className: '',
-                html,
-                iconSize: [ws.size, ws.size],
-                iconAnchor: [ws.size / 2, ws.size / 2],
-              }),
-              interactive: false,
-              zIndexOffset: 300,
-            }).addTo(grp);
-          }
-          grp.addTo(map);
-          cellRef.current = grp;
+
+        // Initialize three separate field layers if needed
+        if (!tempFieldRef.current) tempFieldRef.current = new WeatherField(map);
+        if (!precipFieldRef.current) precipFieldRef.current = new WeatherField(map);
+
+        // Determine visibility/opacity for each layer based on current mode
+        const isOverview = layer === 'standard';
+        const isTempFocus = layer === 'temperature';
+        const isPrecipFocus = layer === 'precipitation';
+        const isWindFocus = layer === 'wind';
+
+        // Temperature field
+        const tempVisible = isOverview || isTempFocus;
+        const tempOpacity = isOverview ? OVERVIEW_INTENSITY.temperature : 1.0;
+        const tempDry = isOverview ? false : (g.maxRain <= MEANINGFUL_RAIN); // in focus, precip dry check doesn't apply to temp
+        tempFieldRef.current.set({
+          points: g.points,
+          mode: 'temperature',
+          field: tempVisible && !tempDry,
+          rings: isOverview ? undefined : rings, // only show rings in focus modes
+        });
+        tempFieldRef.current.setOpacity(tempOpacity);
+
+        // Precipitation field
+        const precipDry = g.maxRain <= MEANINGFUL_RAIN;
+        const precipVisible = (isOverview || isPrecipFocus) && !precipDry;
+        const precipOpacity = isOverview ? OVERVIEW_INTENSITY.precipitation : 1.0;
+        precipFieldRef.current.set({
+          points: g.points,
+          mode: 'precipitation',
+          field: precipVisible,
+          rings: isOverview ? undefined : rings,
+        });
+        precipFieldRef.current.setOpacity(precipOpacity);
+
+        // Wind arrows layer
+        if (windLayerRef.current) {
+          windLayerRef.current.clearLayers();
+          map.removeLayer(windLayerRef.current);
         }
+        const windVisible = isOverview || isWindFocus;
+        if (windLayerRef.current) {
+          map.removeLayer(windLayerRef.current);
+          windLayerRef.current = null;
+        }
+        if (windVisible) {
+          reseedStreamlines(map, g, layer);
+        } else {
+          setStreamlines([]);
+          setMapW(0);
+          setMapH(0);
+        }
+        layerRef.current = layer;
+
+        // Radar tile layer (RainViewer)
+        if (radarTileLayerRef.current) {
+          map.removeLayer(radarTileLayerRef.current);
+          radarTileLayerRef.current = null;
+        }
+        if (layer === 'radar' && radarHost && radarFrames.length > 0) {
+          const frame = radarFrames[radarFrameIndex];
+          const tileUrl = `${radarHost}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
+          radarTileLayerRef.current = L.tileLayer(tileUrl, {
+            maxZoom: 7,
+            attribution: 'Radar © <a href="https://www.rainviewer.com/" target="_blank" rel="noopener">RainViewer</a> ' + OSM_ATTR,
+            opacity: 0.8,
+          }).addTo(map);
+        }
+
       } catch {
         if (!cancelled) {
           setGrid(null);
@@ -320,6 +493,7 @@ export default function WeatherMapView() {
         if (!cancelled) setLayerLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -349,6 +523,32 @@ export default function WeatherMapView() {
         ))}
         <span className="map-meta">{coords}</span>
       </div>
+      {layer === 'radar' && radarFrames.length > 0 && (
+        <div className="radar-time-controls">
+          <div className="radar-time-label">
+            {radarLoading ? 'Loading radar…' : (
+              <>
+                Frame {radarFrameIndex + 1} / {radarFrames.length} —
+                <strong>{new Date(radarFrames[radarFrameIndex].time * 1000).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST</strong>
+              </>
+            )}
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={radarFrames.length - 1}
+            value={radarFrameIndex}
+            onChange={(e) => setRadarFrameIndex(Number(e.target.value))}
+            className="radar-time-slider"
+            aria-label="Radar time frame"
+          />
+          <div className="radar-time-ticks">
+            <span>Latest</span>
+            <span>Oldest</span>
+          </div>
+          {radarError && <div className="radar-error">{radarError}</div>}
+        </div>
+      )}
       <div className="map-surface">
         <div ref={mountRef} className="map-leaf" />
         {!location && (
@@ -361,6 +561,38 @@ export default function WeatherMapView() {
               a location exists.
             </div>
           </div>
+        )}
+        {streamlines.length > 0 && (
+          <svg
+            className="wind-streamlines"
+            viewBox={`0 0 ${mapW || 1} ${mapH || 1}`}
+            preserveAspectRatio="none"
+            aria-hidden
+          >
+            {streamlines.map((s, i) => (
+              <g key={i}>
+                {/* Halo behind the coloured stroke so the line reads against
+                    both light and dark basemap terrain. */}
+                <path
+                  d={s.d}
+                  className="wind-stream-halo"
+                  strokeWidth={s.width + 2.6}
+                />
+                <path
+                  d={s.d}
+                  className="wind-stream"
+                  stroke={s.color}
+                  strokeWidth={s.width}
+                  strokeOpacity={s.opacity}
+                  strokeDasharray="10 16"
+                  style={{
+                    strokeDashoffset: s.dashOffset,
+                    animationDuration: `${s.dashDuration}s`,
+                  }}
+                />
+              </g>
+            ))}
+          </svg>
         )}
         {layerLoading && <div className="map-loading">Loading {activeLabel.toLowerCase()} layer…</div>}
         {layerError && (

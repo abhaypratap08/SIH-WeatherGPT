@@ -50,4 +50,18 @@ public class ChatQueryRequest {
      * Optional sector focus (e.g., "agriculture", "aviation", "marine", "urban").
      */
     private String sector;
+
+    /**
+     * The user's currently selected location (display label only).
+     *
+     * <p>Provides AI weather context when the query itself doesn't name a
+     * place: specialized queries (sector advisories, NWP, climate, alerts)
+     * use it before session memory, and it is stored in the session context
+     * for follow-up turns. There is <b>no implicit default</b> — when neither
+     * the message, the session nor this field supplies a location, the service
+     * answers with a "please specify a location" prompt instead of guessing
+     * coordinates. A location named in the message always wins.
+     */
+    @Size(max = 100, message = "Selected location must not exceed 100 characters")
+    private String location;
 }

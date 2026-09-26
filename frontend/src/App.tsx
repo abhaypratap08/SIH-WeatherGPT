@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import 'leaflet/dist/leaflet.css';
 import {
   Anchor,
   Building2,
   CheckCircle,
   CloudRain,
+  CloudSnow,
+  Cloud,
   Droplets,
   Flame,
   Map as MapIcon,
@@ -11,10 +14,13 @@ import {
   Plane,
   SprayCan,
   Sprout,
+  Sun,
   Thermometer,
   TrendingUp,
   Waves,
   Wind,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import AIChatWorkspace from './components/AIChatWorkspace';
 import AppHeader from './components/AppHeader';
@@ -50,15 +56,48 @@ import { reportCacheKey } from './location/locationCore';
 
 interface RouteApiResponse {
   message?: string;
-  route_info?: any;
+  // New multi-route format (local backend)
+  routes?: RouteData[];
+  // Legacy single-route format (production backend)
+  route_info?: RouteData['route_info'];
   risk_summary?: { HIGH?: number; MODERATE?: number; LOW?: number };
-  weather_data?: WeatherPoint[] | any;
+  weather_data?: WeatherPoint[];
+  map_json?: MapJsonData;
   index_html?: string;
+}
+interface RouteData {
+  route_info: {
+    origin: string;
+    destination: string;
+    distance_km: number;
+    duration_minutes: number;
+    departure_time: string;
+    route_index: number;
+    route_label: string;
+  };
+  risk_summary: { HIGH?: number; MODERATE?: number; LOW?: number };
+  weather_data: WeatherPoint[];
+  map_json: MapJsonData;
+}
+interface MapJsonData {
+  route: [number, number][]; // [lat, lon]
+  weather_points: WeatherPoint[];
+  route_info: RouteData['route_info'];
 }
 interface WeatherPoint {
   location?: string; point?: string; weather?: string; condition?: string;
   temp?: number | string; temperature?: number | string;
   risk?: string; risk_level?: string; description?: string; notes?: string;
+  distance_from_start?: number;
+  arrival_time?: string;
+  weather_time?: string;
+  humidity?: number;
+  rain_probability?: number;
+  wind_speed?: number;
+  weather_code?: number;
+  latitude?: number;
+  longitude?: number;
+  precipitation?: number;
   [key: string]: any;
 }
 interface GeoResult { latitude: number; longitude: number; name: string; country?: string; }
@@ -197,7 +236,7 @@ const S: Record<string, React.CSSProperties> = {
   card: { background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px' },
   cardTitle: { margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--ink)' },
   label: { fontSize: '11px', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted)' },
-  input: { padding: '10px 13px', borderRadius: 'var(--radius-card)', border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink)', fontSize: '14px', outline: 'none', width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-ui)' },
+  input: { padding: '10px 13px', borderRadius: 'var(--radius-card)', border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink)', fontSize: '14px', outline: 'none', width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-ui)', transition: 'border-color var(--transition-fast), box-shadow var(--transition-fast)' },
   btn: { padding: '11px 20px', background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', border: '1px solid var(--slate-teal)', borderRadius: 'var(--radius-btn)', cursor: 'pointer', fontWeight: 700, fontSize: '13.5px', fontFamily: 'var(--font-ui)' },
   error: { padding: '11px 15px', background: 'var(--watch-red-tint)', border: '1px solid var(--watch-red)', color: 'var(--watch-red-deep)', borderRadius: 'var(--radius-card)', fontSize: '13px' },
   successBanner: { padding: '11px 15px', background: 'var(--slate-teal-tint)', border: '1px solid var(--slate-teal)', color: 'var(--slate-teal)', borderRadius: 'var(--radius-card)', fontWeight: 500, fontSize: '13px' },
@@ -213,6 +252,7 @@ const S: Record<string, React.CSSProperties> = {
   jsonBlock: { background: 'var(--mist)', padding: '13px', borderRadius: 'var(--radius-card)', overflowX: 'auto', fontSize: '12px', color: 'var(--ink)', margin: 0, border: '1px solid var(--line)', fontFamily: 'var(--font-mono)' },
   mapWrapper: { width: '100%', borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid var(--line)', background: 'var(--paper)' },
   iframe: { width: '100%', height: '380px', border: 'none', display: 'block' },
+  inputAutofill: { WebkitBoxShadow: '0 0 0 1000px var(--paper) inset', boxShadow: '0 0 0 1000px var(--paper) inset', WebkitTextFillColor: 'var(--ink)' } as React.CSSProperties,
 };
 
 // Token-based panel for rail/drawer destinations.
@@ -227,10 +267,84 @@ const riskStyle = (risk?: string): React.CSSProperties => {
   switch (String(risk ?? '').toUpperCase()) {
     case 'HIGH': return { background: 'var(--watch-red-tint)', color: 'var(--watch-red-deep)', borderColor: 'var(--watch-red)' };
     case 'MODERATE': return { background: 'var(--watch-orange-tint)', color: 'var(--watch-orange-deep)', borderColor: 'var(--watch-orange)' };
-    case 'LOW': return { background: 'var(--slate-teal-tint)', color: 'var(--slate-teal)', borderColor: 'var(--slate-teal)' };
+    case 'LOW': return { background: 'var(--watch-green-tint)', color: 'var(--watch-green-deep)', borderColor: 'var(--watch-green)' };
     default: return { background: 'var(--mist)', color: 'var(--muted)', borderColor: 'var(--line)' };
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────
+// Route Weather data formatting helpers
+// ─────────────────────────────────────────────────────────────────────
+
+/** Round distance to 1 decimal place (30.1 km, not 30.14379...) */
+function fmtDistance(km: number | string | undefined): string {
+  const n = typeof km === 'string' ? parseFloat(km) : km;
+  if (n === undefined || n === null || !Number.isFinite(n)) return '—';
+  return `${n.toFixed(1)} km`;
+}
+
+/** Format arrival time as HH:MM AM/PM (24h → 12h with AM/PM) */
+function fmtArrivalTime(iso: string | Date | undefined): string {
+  if (!iso) return '—';
+  const d = typeof iso === 'string' ? new Date(iso) : iso;
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+/** Check if two times are within the same hour bucket */
+function sameHourBucket(t1: string | Date | undefined, t2: string | Date | undefined): boolean {
+  if (!t1 || !t2) return false;
+  const d1 = typeof t1 === 'string' ? new Date(t1) : t1;
+  const d2 = typeof t2 === 'string' ? new Date(t2) : t2;
+  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return false;
+  return d1.getFullYear() === d2.getFullYear() &&
+         d1.getMonth() === d2.getMonth() &&
+         d1.getDate() === d2.getDate() &&
+         d1.getHours() === d2.getHours();
+}
+
+/** Get time divergence note if arrival_time and weather_time differ meaningfully */
+function getTimeDivergenceNote(arrival: string | Date | undefined, weather: string | Date | undefined): string | null {
+  if (!arrival || !weather) return null;
+  const a = typeof arrival === 'string' ? new Date(arrival) : arrival;
+  const w = typeof weather === 'string' ? new Date(weather) : weather;
+  if (isNaN(a.getTime()) || isNaN(w.getTime())) return null;
+  if (sameHourBucket(a, w)) return null;
+  const arrivalStr = fmtArrivalTime(a);
+  const weatherStr = fmtArrivalTime(w);
+  return `Forecast for ~${weatherStr}, arriving ~${arrivalStr}`;
+}
+
+/** Map weather condition to Lucide icon component */
+function getConditionIcon(condition: string) {
+  const c = condition.toLowerCase();
+  if (c.includes('clear') || c.includes('sunny')) return Sun;
+  if (c.includes('cloud') || c.includes('overcast')) return Cloud;
+  if (c.includes('drizzle')) return CloudRain;
+  if (c.includes('rain') || c.includes('shower')) return CloudRain;
+  if (c.includes('snow') || c.includes('sleet') || c.includes('ice')) return CloudSnow;
+  if (c.includes('fog') || c.includes('mist') || c.includes('haze')) return Cloud;
+  if (c.includes('thunder') || c.includes('storm')) return CloudRain;
+  return Cloud; // default
+}
+
+/** Sentence-case risk label */
+function riskLabel(risk: string): string {
+  const r = String(risk ?? '').toUpperCase();
+  if (r === 'HIGH') return 'High risk';
+  if (r === 'MODERATE') return 'Moderate risk';
+  if (r === 'LOW') return 'Low risk';
+  return 'Normal';
+}
+
+/** Risk badge variant for timeline left border */
+function riskBorderColor(risk: string): string {
+  const r = String(risk ?? '').toUpperCase();
+  if (r === 'HIGH') return 'var(--watch-red)';
+  if (r === 'MODERATE') return 'var(--watch-orange)';
+  if (r === 'LOW') return 'var(--watch-green)';
+  return 'var(--line)';
+}
 
 /**
  * Build a user-safe HTTP error message that captures status, statusText and —
@@ -341,9 +455,11 @@ function RouteWeatherView() {
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<RouteApiResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [expandedDetails, setExpandedDetails] = useState<Set<number>>(new Set());
+  const [activeRouteIndex, setActiveRouteIndex] = useState(0);
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault(); setLoading(true); setErr(null); setResp(null);
+    e.preventDefault(); setLoading(true); setErr(null); setResp(null); setExpandedDetails(new Set()); setActiveRouteIndex(0);
     try {
       const res = await fetch(ML_ROUTE_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) });
       if (!res.ok) throw new Error(`Error ${res.status} - ${res.statusText}`);
@@ -352,11 +468,39 @@ function RouteWeatherView() {
     finally { setLoading(false); }
   };
 
-  const riskBoxes: { key: string; fg: string; bg: string; border: string }[] = [
-    { key: 'HIGH', fg: 'var(--watch-red-deep)', bg: 'var(--watch-red-tint)', border: 'var(--watch-red)' },
-    { key: 'MODERATE', fg: 'var(--watch-orange-deep)', bg: 'var(--watch-orange-tint)', border: 'var(--watch-orange)' },
-    { key: 'LOW', fg: 'var(--slate-teal)', bg: 'var(--slate-teal-tint)', border: 'var(--slate-teal)' },
+  // Normalize both API response formats (legacy single-route + new multi-route)
+  const routes = useMemo((): RouteData[] => {
+    if (!resp) return [];
+    // New format: resp.routes[]
+    if (resp.routes && resp.routes.length > 0) return resp.routes;
+    // Legacy format: single route at top level
+    if (resp.route_info && resp.weather_data) {
+      // Build route coordinates from weather_data waypoints (legacy format lacks map_json)
+      const routeCoords: [number, number][] = (resp.weather_data ?? [])
+        .filter((w: any) => typeof w.latitude === 'number' && typeof w.longitude === 'number')
+        .map((w: any) => [w.latitude, w.longitude] as [number, number]);
+      return [{
+        route_info: resp.route_info,
+        risk_summary: resp.risk_summary ?? { HIGH: 0, MODERATE: 0, LOW: 0 },
+        weather_data: resp.weather_data,
+        map_json: resp.map_json ?? {
+          route: routeCoords,
+          weather_points: resp.weather_data ?? [],
+          route_info: resp.route_info,
+        },
+      }];
+    }
+    return [];
+  }, [resp]);
+
+  const riskStatBoxes = [
+    { key: 'HIGH', label: 'High risk', fg: 'var(--watch-red-deep)', bg: 'var(--watch-red-tint)', border: 'var(--watch-red)' },
+    { key: 'MODERATE', label: 'Moderate risk', fg: 'var(--watch-orange-deep)', bg: 'var(--watch-orange-tint)', border: 'var(--watch-orange)' },
+    { key: 'LOW', label: 'Low risk', fg: 'var(--watch-green-deep)', bg: 'var(--watch-green-tint)', border: 'var(--watch-green)' },
   ];
+
+  const activeRoute = routes[activeRouteIndex];
+  const waypoints = activeRoute?.weather_data ?? [];
 
   return (
     <div style={S.card}>
@@ -367,18 +511,29 @@ function RouteWeatherView() {
 
       <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: '14px' }}>
-          {(['origin', 'destination'] as const).map(field => (
-            <div key={field} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={S.label}>{field.charAt(0).toUpperCase() + field.slice(1)}</label>
-              <input style={S.input} type="text" name={field} value={form[field]}
-                onChange={e => setForm({ ...form, [field]: e.target.value })} required
-                placeholder={field === 'origin' ? 'Starting point' : 'Finish point'} />
-            </div>
-          ))}
+          {(['origin', 'destination'] as const).map(field => {
+            const id = `route-${field}`;
+            return (
+              <div key={field} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label htmlFor={id} style={S.label}>{field.charAt(0).toUpperCase() + field.slice(1)}</label>
+                <input id={id} style={{ ...S.input, ...S.inputAutofill }} type="text" name={field} value={form[field]}
+                  onChange={e => setForm({ ...form, [field]: e.target.value })}
+                  onFocus={e => { e.currentTarget.style.borderColor = 'var(--slate-teal)'; e.currentTarget.style.boxShadow = '0 0 0 3px var(--slate-teal-tint)'; }}
+                  onBlur={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.boxShadow = 'none'; }}
+                  required
+                  placeholder={field === 'origin' ? 'Starting point' : 'Finish point'}
+                  autoComplete="off" />
+              </div>
+            );
+          })}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={S.label}>Departure time</label>
-            <input style={S.input} type="time" name="departure_time" value={form.departure_time}
-              onChange={e => setForm({ ...form, departure_time: e.target.value })} required />
+            <label htmlFor="route-departure_time" style={S.label}>Departure time</label>
+            <input id="route-departure_time" style={{ ...S.input, ...S.inputAutofill }} type="time" name="departure_time" value={form.departure_time}
+              onChange={e => setForm({ ...form, departure_time: e.target.value })}
+              onFocus={e => { e.currentTarget.style.borderColor = 'var(--slate-teal)'; e.currentTarget.style.boxShadow = '0 0 0 3px var(--slate-teal-tint)'; }}
+              onBlur={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.boxShadow = 'none'; }}
+              required
+              autoComplete="off" />
           </div>
         </div>
         <button type="submit" disabled={loading} style={S.btn}>{loading ? 'Analyzing route…' : 'Analyze route'}</button>
@@ -390,64 +545,222 @@ function RouteWeatherView() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {resp.message && <div style={S.successBanner}>{resp.message}</div>}
 
-          {resp.risk_summary && (
+          {/* Route picker — only show when multiple routes available */}
+          {routes.length > 1 && (
+            <div style={S.card}>
+              <h3 style={S.cardTitle}>Route options</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {routes.map((route, idx) => {
+                  const info = route.route_info;
+                  const risk = route.risk_summary;
+                  const isActive = idx === activeRouteIndex;
+                  return (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => { setActiveRouteIndex(idx); setExpandedDetails(new Set()); }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '12px 14px',
+                        borderRadius: 'var(--radius-card)',
+                        border: isActive ? '2px solid var(--slate-teal)' : '1px solid var(--line)',
+                        background: isActive ? 'var(--slate-teal-tint)' : 'var(--paper)',
+                        color: 'var(--ink)',
+                        fontSize: '13px',
+                        fontWeight: isActive ? 700 : 500,
+                        fontFamily: 'var(--font-ui)',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        width: '100%',
+                      }}
+                    >
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{info.route_label}</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '12px', marginTop: '4px', fontSize: '12px', color: 'var(--muted)', flexWrap: 'wrap' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--watch-red)' }} /> {risk.HIGH ?? 0} high
+                          </span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--watch-orange)' }} /> {risk.MODERATE ?? 0} moderate
+                          </span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--watch-green)' }} /> {risk.LOW ?? 0} low
+                          </span>
+                        </div>
+                      </div>
+                      {isActive && <span style={{ color: 'var(--slate-teal)', fontWeight: 700 }}>Active</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Route overview map with risk-coded segments */}
+          {activeRoute && (
+            <RouteOverviewMap
+              route={activeRoute}
+              allRoutes={routes}
+              activeIndex={activeRouteIndex}
+            />
+          )}
+
+          {/* Risk summary stat cards for active route */}
+          {activeRoute && (
             <div style={S.card}>
               <h3 style={S.cardTitle}>Risk summary</h3>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '10px' }}>
-                {riskBoxes.map(({ key, fg, bg, border }) => (
+                {riskStatBoxes.map(({ key, label, fg, bg, border }) => (
                   <div key={key} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '14px', borderRadius: 'var(--radius-card)', background: bg, border: `1px solid ${border}` }}>
-                    <span style={{ fontSize: '1.6rem', fontWeight: 700, color: fg, fontVariantNumeric: 'tabular-nums' }}>{(resp.risk_summary as any)[key] ?? 0}</span>
-                    <span style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }}>{key.charAt(0) + key.slice(1).toLowerCase()}-risk waypoints</span>
+                    <span style={{ fontSize: '1.6rem', fontWeight: 700, color: fg, fontVariantNumeric: 'tabular-nums' }}>{(activeRoute.risk_summary as any)[key] ?? 0}</span>
+                    <span style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }}>{label}</span>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {resp.weather_data && (
+          {/* Waypoint timeline — replaces the old table */}
+          {waypoints.length > 0 && (
             <div style={S.card}>
-              <h3 style={S.cardTitle}>Waypoint forecasts</h3>
-              {Array.isArray(resp.weather_data) ? (
-                <div style={S.tableWrap}>
-                  <table style={S.table}>
-                    <thead><tr>
-                      {['#', 'Point', 'Condition', 'Temp', 'Risk', 'Details'].map(h => <th key={h} style={S.th}>{h}</th>)}
-                    </tr></thead>
-                    <tbody>
-                      {resp.weather_data.map((item: WeatherPoint, i: number) => {
-                        const name = item.location || item.point || item.name || `Point ${i + 1}`;
-                        const cond = item.weather || item.condition || item.sky || 'n/a';
-                        const temp = (item.temp ?? item.temperature) !== undefined ? `${item.temp ?? item.temperature}°C` : 'n/a';
-                        const risk = item.risk || item.risk_level || 'NORMAL';
-                        const detail = item.description || item.notes || item.summary ||
-                          Object.entries(item)
-                            .filter(([k]) => !['location', 'point', 'weather', 'condition', 'temp', 'temperature', 'risk', 'risk_level'].includes(k))
-                            .map(([k, v]) => `${k}: ${v}`).join(', ');
-                        return (
-                          <tr key={i} style={S.tr}>
-                            <td style={S.tdIndex}>{i + 1}</td>
-                            <td style={S.tdBold}>{name}</td>
-                            <td style={S.td}>{cond}</td>
-                            <td style={S.td}>{temp}</td>
-                            <td style={S.td}><span style={{ ...S.badge, ...riskStyle(risk) }}>{risk.toUpperCase()}</span></td>
-                            <td style={S.tdDesc}>{detail || 'n/a'}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <pre style={S.jsonBlock}>{JSON.stringify(resp.weather_data, null, 2)}</pre>
-              )}
-            </div>
-          )}
+              <h3 style={S.cardTitle}>Route timeline</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
+                {waypoints.map((item: WeatherPoint, i: number) => {
+                  const name = item.location || item.point || item.name || `Point ${i + 1}`;
+                  const cond = item.weather || item.condition || item.sky || 'n/a';
+                  const temp = item.temperature ?? item.temp;
+                  const risk = item.risk || item.risk_level || 'NORMAL';
+                  const distance = item.distance_from_start;
+                  const arrival = item.arrival_time;
+                  const weatherTime = item.weather_time;
+                  const humidity = item.humidity;
+                  const rainProb = item.rain_probability;
+                  const windSpeed = item.wind_speed;
+                  const lat = item.latitude;
+                  const lon = item.longitude;
+                  const weatherCode = item.weather_code;
 
-          {resp.index_html && (
-            <div style={S.card}>
-              <h3 style={S.cardTitle}>Route map</h3>
-              <div style={S.mapWrapper}>
-                <iframe title="Route map" srcDoc={resp.index_html} style={S.iframe} />
+                  const timeDivergence = getTimeDivergenceNote(arrival, weatherTime);
+                  const isExpanded = expandedDetails.has(i);
+                  const ConditionIcon = getConditionIcon(cond);
+                  const riskBorder = riskBorderColor(risk);
+
+                  // Build technical details for disclosure
+                  const techDetails: string[] = [];
+                  techDetails.push(`Point: ${name}`);
+                  const latNum = typeof lat === 'number' && Number.isFinite(lat) ? lat : undefined;
+                  const lonNum = typeof lon === 'number' && Number.isFinite(lon) ? lon : undefined;
+                  if (latNum !== undefined && lonNum !== undefined) techDetails.push(`Lat/Lon: ${latNum.toFixed(4)}, ${lonNum.toFixed(4)}`);
+                  if (timeDivergence) techDetails.push(timeDivergence);
+                  if (typeof weatherCode === 'number' && Number.isFinite(weatherCode)) techDetails.push(`Weather code: ${weatherCode}`);
+                  if (item.precipitation !== undefined) techDetails.push(`Precipitation: ${item.precipitation} mm`);
+
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        padding: '14px 16px',
+                        borderBottom: i < waypoints.length - 1 ? '1px solid var(--line)' : 'none',
+                        position: 'relative',
+                        borderLeft: `3px solid ${riskBorder}`,
+                        background: i % 2 === 0 ? 'transparent' : 'var(--mist)',
+                      }}
+                    >
+                      {/* Main waypoint card */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                        {/* Point number / distance marker */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: '70px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--ink)', fontVariantNumeric: 'tabular-nums' }}>{i + 1}</span>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>{fmtDistance(distance)}</span>
+                        </div>
+
+                        {/* Vertical connector line (visual only, via border-left on container) */}
+
+                        {/* Arrival time */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '110px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ink)', fontVariantNumeric: 'tabular-nums', fontFamily: 'var(--font-mono)' }}>{fmtArrivalTime(arrival)}</span>
+                        </div>
+
+                        {/* Condition with icon */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '160px' }}>
+                          <ConditionIcon style={{ width: '18px', height: '18px', color: 'var(--slate-teal)', flexShrink: 0 }} />
+                          <span style={{ fontSize: '13px', color: 'var(--ink)', fontWeight: 500 }}>{cond}</span>
+                        </div>
+
+                        {/* Temperature */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '80px' }}>
+                          <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--ink)', fontVariantNumeric: 'tabular-nums' }}>{typeof temp === 'number' ? `${Math.round(temp)}°C` : '—'}</span>
+                        </div>
+
+                        {/* Risk badge */}
+                        <div style={{ marginLeft: 'auto' }}>
+                          <span style={{ ...S.badge, ...riskStyle(risk) }}>{riskLabel(risk)}</span>
+                        </div>
+                      </div>
+
+                      {/* Secondary stats row */}
+                      <div style={{ display: 'flex', gap: '16px', marginTop: '10px', paddingLeft: '82px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--muted)' }}>
+                        {humidity !== undefined && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <Droplets size={12} style={{ color: 'var(--slate-teal)' }} /> {humidity}%
+                          </span>
+                        )}
+                        {rainProb !== undefined && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <CloudRain size={12} style={{ color: 'var(--slate-teal)' }} /> {rainProb}%
+                          </span>
+                        )}
+                        {windSpeed !== undefined && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <Wind size={12} style={{ color: 'var(--slate-teal)' }} /> {windSpeed} km/h
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Technical details disclosure */}
+                      {techDetails.length > 0 && (
+                        <div style={{ marginTop: '10px' }}>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedDetails(prev => {
+                              const next = new Set(prev);
+                              if (next.has(i)) next.delete(i); else next.add(i);
+                              return next;
+                            })}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              padding: '6px 10px',
+                              background: 'var(--mist)',
+                              border: '1px solid var(--line)',
+                              borderRadius: 'var(--radius-btn)',
+                              color: 'var(--ink)',
+                              fontSize: '12px',
+                              fontWeight: 600,
+                              fontFamily: 'var(--font-ui)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <span>Technical details</span>
+                            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                          {isExpanded && (
+                            <div style={{ marginTop: '8px', padding: '10px', background: 'var(--mist)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>
+                              {techDetails.join('\n')}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -455,6 +768,304 @@ function RouteWeatherView() {
       )}
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RouteMap — Leaflet map for route overview (shared pattern with WeatherMapView)
+// ─────────────────────────────────────────────────────────────────────
+
+interface RouteMapProps {
+  route: RouteData;
+  allRoutes: RouteData[];
+  activeIndex: number;
+}
+
+function RouteMap({ route, allRoutes, activeIndex }: RouteMapProps) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const LRef = useRef<any>(null);
+  const [ready, setReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
+
+  /**
+   * Validate the active route's shape BEFORE Leaflet is asked to mount.
+   * Data problems and render problems are different failures and get
+   * different messages, so the card is diagnostic on sight rather than
+   * collapsing every cause into one generic error.
+   */
+  const routeShapeError = ((): string | null => {
+    if (!route || typeof route !== 'object') return 'Route data incomplete: no active route.';
+    const coords = route.map_json?.route;
+    if (!Array.isArray(coords)) return 'Route data incomplete: no route geometry.';
+    if (coords.length < 2) return 'Route data incomplete: route geometry is empty.';
+    const bad = coords.find(
+      (c) => !Array.isArray(c) || c.length < 2 || !Number.isFinite(c[0]) || !Number.isFinite(c[1]),
+    );
+    if (bad !== undefined) return 'Route data incomplete: malformed coordinate pair.';
+    return null;
+  })();
+
+  // Map initialisation.
+  //
+  // The async work lives in an inner function so this effect can return a
+  // SYNCHRONOUS teardown. Returning cleanup from inside an async IIFE hands
+  // React a Promise instead of a function, so teardown is never registered —
+  // under StrictMode's double-invoke the first map is never removed and the
+  // second L.map() throws "Map container is already initialized".
+  useEffect(() => {
+    if (routeShapeError) return;
+
+    let cancelled = false;
+    let map: any = null;
+    let ro: ResizeObserver | null = null;
+
+    const init = async () => {
+      try {
+        const L = await import('leaflet');
+        // Bail if this effect was torn down, or if the container vanished.
+        if (cancelled || !mountRef.current) return;
+        // Defensive: a stale Leaflet instance on this node means a previous
+        // teardown was missed; drop it so L.map() below cannot throw.
+        const stale = (mountRef.current as any)._leaflet_id;
+        if (stale !== undefined) {
+          delete (mountRef.current as any)._leaflet_id;
+        }
+        LRef.current = L;
+
+        const coords = route.map_json!.route as number[][];
+        const center: [number, number] = [coords[0][0], coords[0][1]];
+
+        map = L.map(mountRef.current, { center, zoom: 7, scrollWheelZoom: false });
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
+        }).addTo(map);
+
+        mapRef.current = map;
+        if (!cancelled) {
+          setReady(true);
+          setMapError(null);
+        }
+
+        const latLngs = coords.map((c) => L.latLng(c[0], c[1]));
+        map.fitBounds(L.latLngBounds(latLngs), { padding: [20, 20] });
+
+        // Self-heal sizing races, same as WeatherMapView.
+        requestAnimationFrame(() => map.invalidateSize());
+        if (typeof ResizeObserver !== 'undefined') {
+          ro = new ResizeObserver(() => map.invalidateSize());
+          ro.observe(mountRef.current!);
+        }
+      } catch (e) {
+        console.error('[RouteMap] Leaflet init failed:', e);
+        if (!cancelled) setMapError('Failed to load map (renderer error).');
+      }
+    };
+
+    void init();
+
+    return () => {
+      cancelled = true;
+      if (ro) {
+        ro.disconnect();
+        ro = null;
+      }
+      if (map) {
+        map.remove();
+        map = null;
+      }
+      mapRef.current = null;
+      LRef.current = null;
+      setReady(false);
+    };
+  }, [activeIndex, routeShapeError, route.map_json?.route]);
+
+  // Draw route layers when map is ready and data changes
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = LRef.current;
+    if (!map || !L || !ready) return;
+
+    // Clear existing layers (except tile layer)
+    map.eachLayer((layer: any) => {
+      if (layer instanceof L.TileLayer) return;
+      map.removeLayer(layer);
+    });
+
+    // Draw alternate routes (dimmed)
+    allRoutes.forEach((r, idx) => {
+      if (idx === activeIndex) return;
+      const coords = r.map_json?.route ?? [];
+      if (coords.length === 0) return;
+      const latLngs = coords.map((c: number[]) => L.latLng(c[0], c[1]));
+      L.polyline(latLngs, {
+        color: token('--slate-teal', '#2E6E7D'),
+        opacity: 0.45,
+        weight: 4,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map);
+    });
+
+    // Draw active route with risk-coded segments
+    drawRiskCodedRoute(map, L, route);
+
+    // Add origin/destination markers
+    const coords = route.map_json?.route ?? [];
+    if (coords.length > 0) {
+      const origin = coords[0];
+      const destination = coords[coords.length - 1];
+      
+      const originIcon = L.divIcon({
+        className: '',
+        html: '<div style="width:14px;height:14px;border-radius:50%;background:var(--slate-teal);border:2px solid var(--paper);box-shadow:0 1px 4px rgba(0,0,0,0.35)"></div>',
+        iconSize: [14, 14], iconAnchor: [7, 7],
+      });
+      const destIcon = L.divIcon({
+        className: '',
+        html: '<div style="width:14px;height:14px;border-radius:50%;background:var(--watch-red);border:2px solid var(--paper);box-shadow:0 1px 4px rgba(0,0,0,0.35)"></div>',
+        iconSize: [14, 14], iconAnchor: [7, 7],
+      });
+
+      L.marker(origin, { icon: originIcon, zIndexOffset: 900 }).addTo(map).bindPopup('Origin');
+      L.marker(destination, { icon: destIcon, zIndexOffset: 900 }).addTo(map).bindPopup('Destination');
+    }
+  }, [route, allRoutes, activeIndex, ready]);
+
+  // Data-shape failure: distinct from a renderer failure, because the fix and
+  // the next debugging step are completely different.
+  if (routeShapeError) {
+    return (
+      <div style={S.card}>
+        <h3 style={S.cardTitle}>Route overview</h3>
+        <div style={{ ...S.mapWrapper, height: '380px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '13px', textAlign: 'center', padding: '0 24px', lineHeight: 1.5 }}>
+          {routeShapeError}
+        </div>
+      </div>
+    );
+  }
+
+  if (mapError) {
+    return (
+      <div style={S.card}>
+        <h3 style={S.cardTitle}>Route overview</h3>
+        <div style={{ ...S.mapWrapper, height: '380px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '13px' }}>
+          {mapError}
+        </div>
+      </div>
+    );
+  }
+
+  // Container structure mirrors WeatherMapView: .map-view -> .map-surface -> ref div
+  return (
+    <div style={S.card}>
+      <h3 style={S.cardTitle}>Route overview</h3>
+      <div className="map-view" style={{ height: '380px', minHeight: '380px' }}>
+        <div className="map-surface">
+          {!ready && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--mist)', zIndex: 10, color: 'var(--muted)', fontSize: '13px' }}>
+              Loading map…
+            </div>
+          )}
+          <div ref={mountRef} className="map-leaf" style={{ width: '100%', height: '100%' }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Keep RouteOverviewMap as thin wrapper for API compatibility
+function RouteOverviewMap({ route, allRoutes, activeIndex }: RouteMapProps) {
+  return (
+    <RouteMap
+      route={route}
+      allRoutes={allRoutes}
+      activeIndex={activeIndex}
+    />
+  );
+}
+
+/**
+ * Resolve a design token to a concrete colour value.
+ *
+ * Leaflet writes `stroke`/`color` into SVG *presentation attributes*, and
+ * presentation attributes do NOT resolve CSS `var()` — passing "var(--x)"
+ * there silently yields no colour. So tokens must be read from the computed
+ * style and handed to Leaflet as literal values. Reading at draw time also
+ * keeps the map correct across light/dark theme changes.
+ */
+function token(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function drawRiskCodedRoute(map: any, L: any, route: RouteData) {
+  const coords = route.map_json?.route ?? [];
+  const weatherPoints = route.map_json?.weather_points ?? [];
+  if (coords.length < 2) return;
+
+  // Build segment colors based on nearest weather point risk
+  // For each segment between consecutive coordinates, find the nearest weather point
+  const segments: { latLngs: [number, number][]; color: string }[] = [];
+
+  // Resolve to literal colours: SVG presentation attributes ignore var().
+  const HIGH = token('--watch-red', '#B43A1B');
+  const MODERATE = token('--watch-orange', '#C97A22');
+  const LOW = token('--watch-green', '#1E7A4C');
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const segStart = coords[i];
+    const segEnd = coords[i + 1];
+    const segMidLat = (segStart[0] + segEnd[0]) / 2;
+    const segMidLon = (segStart[1] + segEnd[1]) / 2;
+
+    // Find nearest weather point
+    let nearestRisk = 'LOW';
+    let minDist = Infinity;
+    for (const wp of weatherPoints) {
+      const wpLat = wp.lat ?? wp.latitude;
+      const wpLon = wp.lon ?? wp.longitude;
+      if (wpLat === undefined || wpLon === undefined) continue;
+      const dLat = wpLat - segMidLat;
+      const dLon = wpLon - segMidLon;
+      const dist = dLat * dLat + dLon * dLon;
+      if (dist < minDist) {
+        minDist = dist;
+        nearestRisk = wp.risk || 'LOW';
+      }
+    }
+
+    const color = nearestRisk === 'HIGH' ? HIGH :
+                  nearestRisk === 'MODERATE' ? MODERATE : LOW;
+
+    segments.push({
+      latLngs: [L.latLng(segStart[0], segStart[1]), L.latLng(segEnd[0], segEnd[1])],
+      color,
+    });
+  }
+
+  // Merge consecutive segments with same color
+  const merged: { latLngs: any[]; color: string }[] = [];
+  for (const seg of segments) {
+    const last = merged[merged.length - 1];
+    if (last && last.color === seg.color) {
+      // Extend the last segment
+      last.latLngs.push(seg.latLngs[1]);
+    } else {
+      merged.push({ latLngs: [...seg.latLngs], color: seg.color });
+    }
+  }
+
+  // Draw merged segments
+  for (const seg of merged) {
+    L.polyline(seg.latLngs, {
+      color: seg.color,
+      opacity: 1,
+      weight: 5,
+      lineCap: 'round',
+      lineJoin: 'round',
+    }).addTo(map);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
