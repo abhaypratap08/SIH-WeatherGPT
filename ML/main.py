@@ -13,9 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from agent import LEAK_REFUSAL, build_agent, geocode_place, get_weather, looks_like_prompt_leak
+from agent import (LEAK_REFUSAL, OPENROUTER_BASE_URL, build_agent, geocode_place,
+                    get_weather, looks_like_prompt_leak)
 from imd_warnings import warning_response
-from llm_budget import cache_get, cache_put
+from llm_budget import (active_model, cache_get, cache_put, cache_stats,
+                        is_free_tier_model)
 from route_weather.analyzer import analyze_route
 from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
 from route_weather.geocoding import get_coordinates
@@ -96,6 +98,39 @@ def get_agent():
 def agent_configured() -> bool:
     """Whether a model provider key is present. Never returns the key itself."""
     return bool(os.environ.get("OPENROUTER_API_KEY"))
+
+
+@app.on_event("startup")
+def log_provider_state() -> None:
+    """
+    Log the model in use and the key state at startup.
+
+    Both facts matter operationally and neither is visible from outside the
+    process. Which model is active determines answer quality and tool-calling
+    reliability; whether a key was found determines whether the agent works at
+    all, and a missing .env produces the same 503 as a wrong key. The key
+    itself is never logged, only whether one is present.
+    """
+    model = active_model()
+    logger.info("model provider : openrouter (%s)", OPENROUTER_BASE_URL)
+    logger.info("model in use   : %s", model)
+    if is_free_tier_model(model):
+        logger.info(
+            "model tier     : FREE — subject to a daily request allowance "
+            "(50/day on the current key). The chat will answer until that "
+            "allowance is used, then report the reset time. Weather, "
+            "forecasts and warnings are unaffected and never consume it."
+        )
+    else:
+        logger.info("model tier     : paid / BYOK — no free-tier daily cap")
+    if agent_configured():
+        logger.info("api key        : present (value never logged)")
+    else:
+        logger.warning(
+            "api key        : NOT FOUND. The agent will return 503 until "
+            "OPENROUTER_API_KEY is set in the environment or a project-root "
+            ".env. Deterministic weather and warning paths still work."
+        )
 
 
 # Set only by a real, successful provider round trip (see weather_agent).
@@ -199,6 +234,13 @@ def health():
         # an actual provider call. Until one succeeds this stays false, which
         # makes the two states impossible to confuse.
         "model_provider_validated": bool(_PROVIDER_VALIDATED["ok"]),
+        # F-3 visibility. The active model and whether it is on the free tier
+        # are reported here so the state is readable without opening the code.
+        # This is deliberately informational: it changes nothing, and it exists
+        # because the 50-request-per-day allowance is an operator decision that
+        # should not require reading a source file to discover.
+        "model": active_model(),
+        "model_is_free_tier": is_free_tier_model(active_model()),
         "answer_cache": cache_stats(),
     }
 

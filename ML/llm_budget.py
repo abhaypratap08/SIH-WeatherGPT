@@ -75,6 +75,22 @@ def cache_stats() -> dict:
     return {"entries": len(_answer_cache), "live": len(live), "ttl_seconds": ANSWER_CACHE_TTL_SECONDS}
 
 
+def active_model() -> str:
+    """The model that will actually be used, after environment overrides."""
+    return os.environ.get("LLM_MODEL") or DEFAULT_MODEL
+
+
+def is_free_tier_model(model_id: str) -> bool:
+    """
+    Whether the model sits on the free tier.
+
+    Reported so the 50-request-per-day constraint is visible in /health rather
+    than only in this file. It is informational: nothing here changes the
+    model, and the choice of paid versus free remains an operator decision.
+    """
+    return ":free" in (model_id or "").lower()
+
+
 # ---------------------------------------------------------------------------
 # Ranked free-model fallback list
 # ---------------------------------------------------------------------------
