@@ -45,6 +45,27 @@ app.add_middleware(
 
 logger = logging.getLogger("weathergpt.ml")
 
+# The service logs its own startup state: which model, whether a key was found,
+# which directory it started from, and which .env it loaded. That output is the
+# whole point of those checks, so the logger has to actually emit.
+#
+# It did not. `logger.info(...)` went to a logger with no handler and no
+# configured root, because uvicorn configures only its own "uvicorn.*" loggers
+# and never touches the root one. The startup check therefore ran, computed the
+# right answer, and printed nothing at all -- the worst possible failure for a
+# diagnostic, since it looks exactly like "no problems found". Caught by
+# reading the log after a real restart, not by any test: asserting on a return
+# value cannot tell you that a message failed to appear.
+#
+# A dedicated handler on this logger, with propagate off, keeps uvicorn's own
+# formatting and handlers untouched.
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
 # =========================================================
 # ENVIRONMENT
 # =========================================================
@@ -57,23 +78,113 @@ logger = logging.getLogger("weathergpt.ml")
 # Real environment variables win over .env (override=False), so a value can be
 # overridden without editing the file.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ML_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Where the service was started from, and which file (if any) it actually
+# loaded. The reported bug was a chat answering "not configured" while a valid
+# key sat in the project-root .env: the two processes disagreed about the world
+# and neither said so. The only cure is to record the inputs at import time and
+# then, at startup, compare them against the .env on disk and shout when they
+# differ. `/health` publishes the same facts so the disagreement is visible
+# from outside the process, not only in a log nobody is reading.
+_START_CWD = os.getcwd()
+_ENV_FILE_LOADED: Optional[str] = None
+_ENV_FILES_ON_DISK: list = []
+_ENV_DOTENV_MISSING = False
+
 for _candidate in (
     os.path.join(_PROJECT_ROOT, ".env"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    os.path.join(_ML_DIR, ".env"),
 ):
     if os.path.isfile(_candidate):
-        try:
-            from dotenv import load_dotenv
+        _ENV_FILES_ON_DISK.append(_candidate)
+        if _ENV_FILE_LOADED is None:
+            try:
+                from dotenv import load_dotenv
 
-            load_dotenv(_candidate, override=False)
-            logger.debug("Loaded environment file: %s", _candidate)
-        except ImportError:  # pragma: no cover - dependency guard
-            logger.warning(
-                "Found %s but python-dotenv is not installed; export "
-                "OPENROUTER_API_KEY in the shell instead.",
-                _candidate,
+                load_dotenv(_candidate, override=False)
+                _ENV_FILE_LOADED = _candidate
+            except ImportError:  # pragma: no cover - dependency guard
+                _ENV_DOTENV_MISSING = True
+                logger.warning(
+                    "Found %s but python-dotenv is not installed; export "
+                    "OPENROUTER_API_KEY in the shell instead.",
+                    _candidate,
+                )
+
+
+def key_in_file(path: str) -> Optional[bool]:
+    """
+    Whether `path` defines a non-empty OPENROUTER_API_KEY, read without the
+    value ever being returned or logged.
+
+    Three states matter, not two: absent file, present-but-blank, and
+    present-and-set. Collapsing them is what made the original failure hard to
+    read. Returns None when the file does not exist.
+
+    Quoting and trailing comments are handled because a hand-written .env very
+    often contains `OPENROUTER_API_KEY=""  # add yours here`, and calling that
+    a usable key would have this function pronounce a process healthy on the
+    strength of a file that configures nothing. That is the same class of error
+    as the original bug: a confident statement about a credential that is not
+    there.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() != "OPENROUTER_API_KEY":
+                    continue
+                value = value.strip()
+                if value[:1] in ("'", '"'):
+                    # Quoted: the value is what sits between the quotes. The
+                    # closing quote is NOT the last character when a comment
+                    # follows, so it has to be located rather than assumed.
+                    quote = value[0]
+                    close = value.find(quote, 1)
+                    inner = value[1:close] if close != -1 else value[1:]
+                    return bool(inner.strip())
+                # Unquoted: a trailing `#` begins a comment, as dotenv treats it.
+                value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+                return bool(value)
+    except OSError:
+        return None
+    return False
+
+
+def env_disagreement() -> Optional[str]:
+    """
+    Describe a mismatch between the .env on disk and what this process loaded.
+
+    Returns None when the process is consistent with disk. Otherwise a short
+    human-readable reason, e.g. "a project-root .env defines OPENROUTER_API_KEY
+    but this process did not load it". This is the single place that decides
+    whether the running service can be trusted to know about the key, and it
+    deliberately never reads or returns the key itself.
+    """
+    if _ENV_DOTENV_MISSING and _ENV_FILES_ON_DISK:
+        return (
+            "python-dotenv is not installed, so the .env file was found but "
+            "not loaded; export OPENROUTER_API_KEY in the shell instead"
+        )
+    in_process = agent_configured()
+    for path in _ENV_FILES_ON_DISK:
+        if key_in_file(path) and not in_process:
+            return (
+                f"{path} defines OPENROUTER_API_KEY but this process did not "
+                "load it; the running service will report 503 not-configured "
+                "while the key exists on disk"
             )
-        break
+    if in_process and not any(key_in_file(p) for p in _ENV_FILES_ON_DISK):
+        return (
+            "OPENROUTER_API_KEY is set in the process environment but no .env "
+            "on disk defines it; the service is running on a key you cannot "
+            "see in the file"
+        )
+    return None
 
 
 # =========================================================
@@ -123,6 +234,24 @@ def log_provider_state() -> None:
         )
     else:
         logger.info("model tier     : paid / BYOK — no free-tier daily cap")
+
+    # These three lines are the cure for "it says not configured but the key
+    # is right there". Without them the only evidence is that a key was found,
+    # which is indistinguishable from a process started in the wrong directory,
+    # before the .env existed, or by an older revision that had no loader.
+    logger.info("service cwd    : %s", _START_CWD)
+    # Build the sentence, then log it whole. Doing it this way removes the
+    # whole class of "two placeholders, one of them nested inside an argument"
+    # mistake, which is exactly what shipped in the first version of this line:
+    # logging raised TypeError, the traceback filled the startup log, and the
+    # env file path -- the one fact this whole function exists to report -- was
+    # the one line that never appeared.
+    if _ENV_FILE_LOADED:
+        _env_line = _ENV_FILE_LOADED
+    else:
+        _seen = ", ".join(_ENV_FILES_ON_DISK) or "no .env at project root or in ML/"
+        _env_line = f"NONE FOUND (checked: {_seen})"
+    logger.info("env file loaded: %s", _env_line)
     if agent_configured():
         logger.info("api key        : present (value never logged)")
     else:
@@ -130,6 +259,16 @@ def log_provider_state() -> None:
             "api key        : NOT FOUND. The agent will return 503 until "
             "OPENROUTER_API_KEY is set in the environment or a project-root "
             ".env. Deterministic weather and warning paths still work."
+        )
+
+    # The loud one: this process and the .env on disk tell different stories.
+    # Do not let a user debug a key that was never the problem.
+    mismatch = env_disagreement()
+    if mismatch:
+        logger.error(
+            "ENV MISMATCH   : %s. Restart the service from the project root "
+            "so it loads the same .env you are editing.",
+            mismatch,
         )
 
 
@@ -242,6 +381,19 @@ def health():
         "model": active_model(),
         "model_is_free_tier": is_free_tier_model(active_model()),
         "answer_cache": cache_stats(),
+        # Why the boolean above is what it is. "configured" alone cannot tell a
+        # healthy process from one started in the wrong directory, before the
+        # .env existed, or by a revision with no loader at all, which is
+        # precisely the confusion behind the reported "not configured while the
+        # key exists". These fields let anyone answer that question from
+        # outside the process. Paths only; no credential is ever included, and
+        # `mismatch` is null when the process agrees with the file on disk.
+        "env": {
+            "cwd": _START_CWD,
+            "loaded": _ENV_FILE_LOADED,
+            "found_on_disk": list(_ENV_FILES_ON_DISK),
+            "mismatch": env_disagreement(),
+        },
     }
 
 

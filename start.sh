@@ -114,6 +114,32 @@ check_ports_free() {
     fi
 }
 
+# Single-port form of the guard, for `./start.sh ml` and friends.
+#
+# The full-stack `start` path was guarded, but the per-service commands were
+# not, and each start_* function then fell back to "Port N in use - assuming
+# X is running". That sentence IS the bug: a stale ML process started before
+# the .env existed kept answering :8000, reported itself as not configured,
+# and the operator debugging it was staring at a key that process had never
+# read. "Assume it is running" is never safe when the point of the command is
+# to run the code you just edited.
+refuse_port_occupied() {
+    local port="$1" desc="$2"
+    error "Port $port is already in use, needed by: $desc"
+    port_owner_desc "$port" | while IFS= read -r line; do
+        printf "      %s\n" "$line"
+    done
+    printf "\n"
+    error "Refusing to start $desc."
+    error "An existing process is serving that port, so the app would talk to"
+    error "THAT process instead of the code you just changed. It may be a stale"
+    error "run from before your edits, which is how a valid key ends up reported"
+    error "as missing. Stop it first, then retry:"
+    error "    ./start.sh stop"
+    error "    (or free the specific port, e.g. kill \$(lsof -ti :$port))"
+    exit 1
+}
+
 stop_port() {
     if command -v lsof >/dev/null 2>&1; then
         PIDS="$(lsof -ti ":$1" 2>/dev/null || true)"
@@ -149,7 +175,7 @@ trap cleanup INT TERM
 start_backend() {
     require_command java; require_command mvn
     [ -f "$BACKEND_DIR/pom.xml" ] || { error "pom.xml not found"; exit 1; }
-    if port_in_use "$BACKEND_PORT"; then warn "Port $BACKEND_PORT in use — assuming Java backend is running."; info "Java backend: http://localhost:$BACKEND_PORT"; return; fi
+    if port_in_use "$BACKEND_PORT"; then refuse_port_occupied "$BACKEND_PORT" "Java backend"; fi
     info "Starting Java backend (Spring Boot) on :$BACKEND_PORT..."
     ( cd "$BACKEND_DIR" && mvn spring-boot:run ) & BACKEND_PID=$!
     COUNT=0
@@ -168,7 +194,7 @@ start_ml() {
     [ -f "$ML_DIR/main.py" ] || { warn "ML/main.py not found — skipping."; return; }
     UVCORN="$(uvicorn_cmd)"
     ! command -v "$UVCORN" >/dev/null 2>&1 && [ "$UVCORN" = "uvicorn" ] && { warn "uvicorn not found — skipping. Run: pip install -r ML/requirements.txt"; return; }
-    if port_in_use "$ML_PORT"; then warn "Port $ML_PORT in use — assuming ML backend is running."; info "ML backend: http://localhost:$ML_PORT"; return; fi
+    if port_in_use "$ML_PORT"; then refuse_port_occupied "$ML_PORT" "Python ML backend"; fi
     info "Starting Python ML backend on :$ML_PORT..."
     ( cd "$ML_DIR" && "$(uvicorn_cmd)" main:app --host 0.0.0.0 --port "$ML_PORT" --reload ) & ML_PID=$!
     COUNT=0
@@ -185,7 +211,7 @@ start_ml() {
 # ------------------------------------------------------------
 start_voice_service() {
     [ -f "$VOICE_DIR/main.py" ] || { warn "Voice service not found — skipping."; return; }
-    if port_in_use "$VOICE_PORT"; then warn "Port $VOICE_PORT in use."; return; fi
+    if port_in_use "$VOICE_PORT"; then refuse_port_occupied "$VOICE_PORT" "Voice service"; fi
     info "Starting voice service on :$VOICE_PORT..."
     # VOICE_ENABLED is the voice service's own switch, not an Ollama one: it was
     # removed by mistake during the provider migration, which left the service
@@ -209,7 +235,7 @@ start_voice_service() {
 start_frontend() {
     require_command npm
     [ -f "$FRONTEND_DIR/package.json" ] || { warn "frontend/package.json not found — skipping."; return; }
-    if port_in_use "$FRONTEND_PORT"; then warn "Port $FRONTEND_PORT in use."; info "Frontend: http://localhost:$FRONTEND_PORT"; return; fi
+    if port_in_use "$FRONTEND_PORT"; then refuse_port_occupied "$FRONTEND_PORT" "Frontend"; fi
     info "Starting frontend on :$FRONTEND_PORT..."
     ( cd "$FRONTEND_DIR" && npm run dev ) & FRONTEND_PID=$!
     COUNT=0
@@ -338,12 +364,24 @@ case "$COMMAND" in
             [ -n "$FRONTEND_PID" ] && ! kill -0 "$FRONTEND_PID" 2>/dev/null && { error "Frontend stopped.";      cleanup; }
         done ;;
     backend)
+        # Same refusal as the full-stack path, for the same reason: a
+        # process already on the port is a process running old code.
+        port_in_use "$BACKEND_PORT" && refuse_port_occupied "$BACKEND_PORT" "Java backend"
         start_backend; [ -n "$BACKEND_PID" ] && wait "$BACKEND_PID" ;;
     ml)
+        # Same refusal as the full-stack path, for the same reason: a
+        # process already on the port is a process running old code.
+        port_in_use "$ML_PORT" && refuse_port_occupied "$ML_PORT" "Python ML backend"
         start_ml; [ -n "$ML_PID" ] && wait "$ML_PID" ;;
     frontend)
+        # Same refusal as the full-stack path, for the same reason: a
+        # process already on the port is a process running old code.
+        port_in_use "$FRONTEND_PORT" && refuse_port_occupied "$FRONTEND_PORT" "Frontend"
         start_frontend; [ -n "$FRONTEND_PID" ] && wait "$FRONTEND_PID" ;;
     voice)
+        # Same refusal as the full-stack path, for the same reason: a
+        # process already on the port is a process running old code.
+        port_in_use "$VOICE_PORT" && refuse_port_occupied "$VOICE_PORT" "Voice service"
         start_voice_service; [ -n "$VOICE_PID" ] && wait "$VOICE_PID" ;;
     setup)   setup_project ;;
     test)    run_tests ;;
