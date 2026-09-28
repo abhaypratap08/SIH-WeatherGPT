@@ -550,13 +550,27 @@ export default function WeatherMapView() {
     if (dotRef.current) {
       dotRef.current.setLatLng([location.latitude, location.longitude]);
     } else {
+      // The dot marks where the numbers on screen came from. It is not a
+      // control: `interactive: false` already means tapping it does nothing.
+      //
+      // Leaflet nonetheless gave it role="button" and tabindex="0", so a
+      // keyboard or screen-reader user tabbed onto a 12x12 element that
+      // announced as the bare word "button" and did nothing when activated. A
+      // control with no action must not advertise itself as one.
+      //
+      // `keyboard: false` removes the role and the tab stop. `alt` and `title`
+      // still name it, so anyone who reaches the element another way learns
+      // which place it marks instead of getting nothing.
       dotRef.current = L.marker([location.latitude, location.longitude], {
         icon: L.divIcon({
-          className: '',
+          className: 'map-loc-dot-marker',
           html: '<div class="map-loc-dot"></div>',
           iconSize: [12, 12],
           iconAnchor: [6, 6],
         }),
+        alt: `Weather location: ${location.name || 'selected point'}`,
+        title: location.name || 'Selected point',
+        keyboard: false,
         interactive: false,
         zIndexOffset: 900,
       }).addTo(map);
