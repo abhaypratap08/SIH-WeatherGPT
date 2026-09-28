@@ -1,7 +1,7 @@
 # QA Report — WeatherGPT (frontend + integrated services)
 
 **Date:** 2026-09-26 (remediation round 2)
-**QA STATUS: PASS WITH ISSUES** — 0 P0. Both P1 findings FIXED. Of the P2 findings: 7 FIXED, 1 NOT_A_DEFECT (retracted), 1 superseded by ML-1. Of the P3 findings: 3 FIXED, 2 OPEN (deferred by decision). PROMPT-001 remains **BLOCKED on a missing `OPENROUTER_API_KEY`**, not on a code defect. Every finding below carries exactly one current status; the round-by-round narrative is kept at the end as a remediation log and is not a second source of truth. No crashes, no data corruption, no XSS, no request storms. The honesty/fallback behaviour that is this product's differentiator works and is largely well built. The defects cluster in one theme: **degraded and narrow-viewport states are not held to the same standard as the happy path.**
+**QA STATUS: PASS WITH ISSUES** — 0 P0. Both P1 findings FIXED. Of the P2 findings: 7 FIXED, 1 NOT_A_DEFECT (retracted), 1 superseded by ML-1. Of the P3 findings: 4 FIXED, 1 OPEN (P3-015, deferred by decision). PROMPT-001 remains **BLOCKED on a missing `OPENROUTER_API_KEY`**, not on a code defect. Every finding below carries exactly one current status; the round-by-round narrative is kept at the end as a remediation log and is not a second source of truth. No crashes, no data corruption, no XSS, no request storms. The honesty/fallback behaviour that is this product's differentiator works and is largely well built. The defects cluster in one theme: **degraded and narrow-viewport states are not held to the same standard as the happy path.**
 
 ---
 
@@ -320,10 +320,9 @@ Verified by assertion. Suite and counts are in the Remediation log at the end of
 #### P3-014 · Cached-location fallback does not name which location is cached
 Searching `zzzqqqxxyyvvv` yields "Location not found. Showing cached forecast." and then displays a **different** city's data. The behaviour is honest (it says "cached") and the cached city's name is shown in the heading — but the message itself doesn't connect the two, which reads as a glitch.
 **Recommendation:** "Couldn't find *zzzqqqxxyyvvv*. Showing the cached forecast for **Kochi**."
-- **Status:** OPEN (deferred to backlog)
-  Open by decision: explicitly deferred out of this pass. Not started.
-
-Open by decision: explicitly deferred out of this pass. Not started.
+- **Status:** FIXED
+  Promoted out of the backlog and fixed in this pass, as the required
+  companion to P2-004. Verified by assertion; see the Remediation log.
 
 
 #### P3-015 · Coordinate input is not supported by the report search
@@ -331,8 +330,6 @@ Open by decision: explicitly deferred out of this pass. Not started.
 **Recommendation:** Detect a `lat,lon` pair client-side and send coordinates.
 - **Status:** OPEN (deferred to backlog)
   Open by decision: explicitly deferred out of this pass. Not started.
-
-Open by decision: explicitly deferred out of this pass. Not started.
 
 
 #### P3-016 · Raw ISO-8601 timestamp with microseconds shown to users
@@ -1055,3 +1052,132 @@ asserted a `sanitize()` result shape that predated the `district` field added fo
 IMD bulletins, and `deepStrictEqual` distinguishes a missing key from an
 explicit `undefined`. The expectation was updated to match the intentional type;
 the product code was not changed.
+
+---
+
+# Remediation log — saved-location marker (P3-014) and voice setup
+
+## Evidence that can and cannot be re-checked
+
+Stated plainly, because it changes how much weight each claim carries.
+
+| Claim | Re-checkable? |
+|---|---|
+| No frontend code path can write to the Java backend | **Yes.** Static analysis, current, and the assertions in `scripts/verify-api-safety.sh` |
+| A local session cannot silently reach production | **Yes.** `scripts/verify-api-safety.sh`, 7/7 |
+| The earlier runs sent 114 requests, all 200 or 503 | **No.** That tally came from a recorded run summary. The raw harness logs were in `/tmp` and have been cleared, so it cannot be re-inspected. It is a historical record, not reproducible evidence |
+| No secret is committed | **Yes.** Re-runnable scan over the committed diff |
+| Current finding statuses | **Yes.** Re-runnable browser assertions |
+
+The distinction matters: the structural argument (this UI cannot mutate
+production) is verifiable today. The historical traffic record is a recollection
+of a run summary, and no reader should treat it as independently confirmed.
+
+## P3-014 · saved-location marker (promoted from backlog)
+
+The original "no default city" rule existed to stop a hardcoded location being
+shown as if it were live. Persisting the user's own last choice cannot do that,
+provided it is always labelled and never treated as a current fix. That
+provision is what P3-014 implements.
+
+| Requirement | Implementation |
+|---|---|
+| Name the location and mark it as saved | Pill reads `Delhi, saved from your last visit`, plus a visible `saved` tag and `data-location-restored="true"` |
+| One-click re-detect | Pill's accessible name becomes `Use my current location instead` and clicking it clears the marker |
+| Prefer a fresh fix on load, but never prompt | On mount with a restored location, `navigator.permissions.query()` is consulted. It is a **silent status read**: a refresh happens only when permission is already `granted`, so load can never raise a permission dialog |
+| No IMD warnings for a stored location | `fetchAlerts` returns early while the state is `restored`, so the bulletin is withheld rather than presented as current |
+
+**Verification: 15/15 assertions**, covering the marker appearing, a fresh fix
+replacing it, the marker disappearing, the IMD request being absent while
+restored and present once live, permission staying ungranted after load, and
+corrupt storage degrading with no marker and a purged entry.
+
+### Two real bugs found by writing those assertions
+
+**1. The mount refresh claimed to be live without being live.** The pre-existing
+auto-fill guard `if (!explicit && prev) return prev` refuses to replace a
+non-empty location, which correctly protects a selection the user made this
+session. It also blocked the restored-location refresh, so the refresh cleared
+the saved marker while keeping the old coordinates. The guard now exempts a
+restored location, which is prior evidence rather than a live choice. Verified
+by asserting the canonical coordinates actually change to the fixed position
+with `source: "gps"`.
+
+**2. A GPS fix could never receive IMD warnings.** The success path called
+`reverseGeocodeLabel`, which returns only the display name, so a GPS location
+never received a `country`. `isInIndia` requires `country === "India"`, so the
+India gate was permanently false for GPS: a user standing in India got weather
+but no warnings, and no error, because skipping was the designed safe default.
+The path now uses the full `reverseGeocode` and stores `district`, `region` and
+`country`. This was found only because the P3-014 assertion required a *live*
+Indian location to actually fetch alerts.
+
+### Test defects found in my own harness
+
+- An assertion asserted the permission state was **not** `prompt`. `prompt` is
+  the correct outcome: permission stays ungranted precisely because load never
+  requested it. The assertion was backwards.
+- Alert detection used only a `page.route` glob. A glob that fails to match makes
+  "0 calls" pass **vacuously**, which is the same trap that made an earlier
+  P1-001 run report 28/28 while testing nothing. Detection now also uses a
+  request event, and the live-location case stubs reverse geocoding so the
+  assertion tests the saved-location gate rather than the geocoder.
+- The first version asserted on the pill's display name, which depends on an
+  async reverse-geocode call that cannot resolve in this sandbox. It now asserts
+  on canonical coordinates.
+
+## Step 6 · voice setup: FAILED, stopped as instructed
+
+`./start.sh setup` ran and reported the failure correctly rather than claiming
+success:
+
+```
+[INFO]   note: openai-whisper pulls PyTorch, so this is a large download.
+ERROR: Could not install packages due to an OSError: [Errno 122] Disk quota exceeded
+[WARN]   Retry:  .venv/bin/pip install -r voice_service/requirements.txt
+[WARN] Setup finished with 1 problem: voice dependencies are missing.
+[WARN] Everything else installed. The app runs; only voice is unavailable.
+```
+
+**Not worked around, as instructed.** `openai-whisper`, `gTTS` and `pyttsx3`
+remain absent, and the voice service was not started.
+
+The quota is worth understanding before any retry. `df` reported **402 GB free**
+on the same filesystem at the same time, and 3 GB writes to `$HOME` succeed
+now, so this is a **filesystem quota, not exhausted disk**. The likely cause is
+that the pip download cache and the unpacked wheel coexisted and crossed the
+threshold together; a failed partial download of roughly 307 MB is still in
+`~/.cache/pip` and could be purged before a retry. That is a cleanup, not a
+workaround, but it is left for you to approve.
+
+**The venv survived the failed install.** All of `fastapi`, `uvicorn`,
+`requests`, `pydantic`, `langchain`, `langchain_openai`, `dotenv` and
+`multipart` still import, `pip check` reports no broken requirements, and
+`ML/main.py` imports with all 8 routes intact.
+
+## Service health after this pass
+
+| Service | Port | State |
+|---|---|---|
+| Java backend | 8080 | **UP.** `Started WeatherGptApplication`; root returns 401, i.e. up and auth-gated |
+| ML backend | 8000 | **UP.** `/health` 200, `model_provider_configured: false` |
+| Frontend | 5173 | **UP.** 200 |
+| Voice | 8001 | **DOWN.** Dependencies absent, not started |
+
+### A stale process briefly reported a false positive
+
+Partway through this pass, `/health` reported `model_provider_configured: true`
+while no key existed anywhere. Cause: an ML service left running from an earlier
+verification, started while a throwaway placeholder `.env` was present, was still
+holding port 8000. Its process environment carried that placeholder, and my
+newer launch could not bind the port.
+
+The `true` was **my placeholder, not an operator key.** All such processes were
+killed and the service restarted clean, which is why the table above correctly
+reads `false`. The key is genuinely absent, so Step 1 remains blocked and the
+smoke test and red-team suite were not run.
+
+Worth noting as a process lesson: two earlier `pkill` calls were part of compound
+shell commands that received SIGTERM before reaching the `pkill`, so the stale
+process survived several rounds unnoticed and only surfaced because a boolean
+contradicted a direct check of its environment.

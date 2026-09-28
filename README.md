@@ -852,6 +852,61 @@ Backend will be available at:
 http://localhost:8000
 ```
 
+## 6. Running the Tests
+
+### Java backend
+
+```bash
+cd backend && mvn test
+```
+
+Last full run: **140 tests, 0 failures, 0 errors, 0 skipped** across 20 classes.
+
+| Test class | Covers |
+|---|---|
+| `AuthControllerTest` | registration, login, JWT issuance |
+| `JwtTokenProviderTest` | token signing, expiry, validation |
+| `CorsConfigurationTest` | allowed origins and methods |
+| `AlertServiceTest` | alert assembly and filtering |
+| `AlertControllerTest` | alert endpoints |
+| `NoOpAlertProviderTest` | the no-op provider fallback |
+| `ImdEarlyWarningServiceTest` | IMD early-warning parsing |
+| `WeatherServiceTest` | weather aggregation |
+| `WeatherControllerTest` | weather endpoints |
+| `WeatherCoordinateAwareEndpointsTest` | coordinate-first endpoint contract |
+| `WeatherQueryFlowTest` | end-to-end query flow |
+| `WeatherResponseGeneratorTest` | response text generation |
+| `ClimateAnalysisServiceTest` | climate metric generation |
+| `NwpModelServiceTest` | NWP model handling |
+| `SectorAdvisoryServiceTest` | sector advisories |
+| `OpenMeteoGeocodingProviderTest` | geocoding provider |
+| `OpenMeteoWeatherProviderTest` | weather provider |
+| `DeterministicWeatherQueryInterpreterTest` | query interpretation |
+| `LlmQueryUnderstandingServiceTest` | LLM query understanding |
+| `LocalizationServiceTest` | language handling |
+
+### Frontend
+
+```bash
+cd frontend
+npm run typecheck   # tsc -b --noEmit
+npm run lint        # eslint src
+npm test            # node --test ../tests/*.test.ts
+npm run build       # tsc -b && vite build
+```
+
+`npm test` runs the zero-dependency Node test suites in `tests/`
+(`location_core.test.ts`, `radar_core.test.ts`).
+
+### API safety guard
+
+```bash
+./scripts/verify-api-safety.sh
+```
+
+Builds the app under seven `VITE_*` configurations and asserts the effective
+API base URL, so a local session cannot silently reach a deployed service.
+
 ---
 
 # 📡 Example API
