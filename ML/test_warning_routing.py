@@ -31,6 +31,13 @@ from fastapi.testclient import TestClient
 PASS, FAIL = [], []
 
 
+class Msg:
+    """Minimal stand-in for an AIMessage; the service reads `.content`."""
+
+    def __init__(self, content):
+        self.content = content
+
+
 def check(name, ok, detail=""):
     (PASS if ok else FAIL).append(name)
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
@@ -240,16 +247,64 @@ def main():
         "Is it hot in New York right now",
         "What is the current weather forecast for my location?",
     ]
+    # Definitional questions are NOT warning lookups. The first version routed
+    # these to the district lookup, which answered "I could not work out which
+    # place you mean" — worse than not intercepting them at all.
+    definitional = [
+        "Explain the difference between warning and advisory.",
+        "What does a red alert mean?",
+        "What is a cyclone?",
+        "How do I read a wind speed of 25 km/h?",
+    ]
     bad = [q for q in warn_q if not is_warning_question(q)]
     check("  all warning questions detected", not bad, "; ".join(bad))
     misrouted = [q for q in cond_q if is_warning_question(q)]
     check("  no conditions question misrouted", not misrouted, "; ".join(misrouted))
+    definitional_misrouted = [q for q in definitional if is_warning_question(q)]
+    check("  no definitional question treated as a warning lookup",
+          not definitional_misrouted, "; ".join(definitional_misrouted))
     p = extract_place_for_warning("Is there any active IMD alert for Thrissur district right now?")
     check("  place extracted from the Thrissur question",
           p and "thrissur" in p.lower(), str(p))
     p2 = extract_place_for_warning("Any cyclone warning in Odisha?")
     check("  place extracted from a terse question",
           p2 and "odisha" in p2.lower(), str(p2))
+
+    # 9. A warning question with no place and no caller location is AMBIGUOUS and
+    #    must fall through to the agent, not to a lookup that cannot succeed.
+    print("\n### 9. Ambiguous warning question falls through to the agent")
+    fell = []
+
+    class RecordingAgent:
+        def invoke(self, payload):
+            fell.append(payload)
+            return {"messages": [Msg("Here is a general explanation of IMD warnings.")]}
+
+    with mock.patch("imd_warnings.fetch_warnings"):
+        with mock.patch.object(ml, "get_agent", lambda: RecordingAgent()):
+            c2 = TestClient(ml.app)
+            r2 = c2.post("/agent", json={"prompt": "Is there any active warning right now?"})
+    print(f"  HTTP {r2.status_code}  path={r2.headers.get('X-Response-Path')}")
+    check("  no-place warning question reaches the agent",
+          r2.headers.get("X-Response-Path") == "llm_backed" and len(fell) == 1,
+          f"path={r2.headers.get('X-Response-Path')} calls={len(fell)}")
+
+    # 10. A warning question WITH a caller location must not crash. LocationPayload
+    #     carries lat/lon only, and an earlier version read location.name.
+    print("\n### 10. Warning question with a caller location (regression: AttributeError)")
+    with mock.patch("imd_warnings.fetch_warnings",
+                    return_value={"ok": True, "alerts": [], "provider_status": "",
+                                  "provider_active": False, "total": 0}), \
+         mock.patch("imd_warnings._reverse_geocode", return_value=THRISSUR_ADMIN):
+        c3 = TestClient(ml.app)
+        r3 = c3.post("/agent", json={"prompt": "Any warning right now?",
+                                     "location": {"latitude": 9.9312, "longitude": 76.2673}})
+    print(f"  HTTP {r3.status_code}  path={r3.headers.get('X-Response-Path')}")
+    print(f"  {(r3.json().get('message') or r3.json().get('detail') or '')[:110]}")
+    check("  does not crash on a location-only payload", r3.status_code == 200, str(r3.status_code))
+    check("  answers deterministically using the reverse-geocoded district",
+          r3.headers.get("X-Response-Path") == "warnings_deterministic",
+          str(r3.headers.get("X-Response-Path")))
 
     print("\n" + "=" * 78)
     print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")

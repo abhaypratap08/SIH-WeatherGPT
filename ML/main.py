@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from agent import LEAK_REFUSAL, build_agent, geocode_place, get_weather, looks_like_prompt_leak
 from imd_warnings import warning_response
+from llm_budget import cache_get, cache_put
 from route_weather.analyzer import analyze_route
 from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
 from route_weather.geocoding import get_coordinates
@@ -198,6 +199,7 @@ def health():
         # an actual provider call. Until one succeeds this stays false, which
         # makes the two states impossible to confuse.
         "model_provider_validated": bool(_PROVIDER_VALIDATED["ok"]),
+        "answer_cache": cache_stats(),
     }
 
 
@@ -647,6 +649,18 @@ def weather_agent(request: AgentRequest):
     # this service. Those are retried with linear backoff, because reporting
     # them as "the model is unavailable" would be untrue: nothing is broken,
     # the provider is momentarily busy.
+    # A short-TTL cache in front of the model. The binding constraint is the
+    # daily free-tier allowance (50 requests/day on this key), not latency, and
+    # repeated or rephrased questions are the cheapest waste to remove. Fast
+    # paths have already returned by this point, so a hit here means a genuine
+    # repeat of an identical model-backed question.
+    cached = cache_get(request.prompt)
+    if cached is not None:
+        return JSONResponse(
+            content={"message": cached},
+            headers={"X-Response-Path": "llm_backed_cached"},
+        )
+
     answer = None
     last_error: Exception | None = None
     daily_cap_reset: Optional[datetime] = None
@@ -716,6 +730,8 @@ def weather_agent(request: AgentRequest):
             status_code=502,
             detail=f"The weather model could not be reached ({type(last_error).__name__}).",
         )
+
+    cache_put(request.prompt, answer)
 
     return JSONResponse(
         content={"message": answer},

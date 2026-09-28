@@ -76,15 +76,33 @@ PLACE_STOPWORDS = {
 }
 
 
+# A question about what a WARNING TERM MEANS, rather than about whether one is
+# active somewhere. These must fall through to the agent: routing "what does a
+# red alert mean?" to a district lookup answered "I could not work out which
+# place you mean", which is worse than not routing it at all.
+EXPLANATORY = re.compile(
+    r"\b(what\s+(does|do)\b[^?.]{0,40}\bmean\b"
+    r"|explain\b"
+    r"|difference\s+between\b"
+    r"|what\s+is\s+(a|an|the)\s+(cyclone|heatwave|flood|advisory|alert|warning|monsoon)\b"
+    r"|how\s+do\s+i\s+(read|interpret|understand)\b"
+    r"|define\b)",
+    re.IGNORECASE,
+)
+
+
 def is_warning_question(prompt: str) -> bool:
     """
     Whether the prompt is asking about a hazard WARNING rather than conditions.
 
-    Deliberately biased toward TRUE. A false positive routes a conditions
-    question to the deterministic warnings lookup, which will answer "no active
-    warning" and look odd; a false negative sends a warning question to the
-    model, which is the outcome this whole module exists to prevent.
+    Biased toward TRUE, because a false negative hands a warning question to a
+    model that can invent one. The bias is bounded by two later gates: an
+    explanatory question is never warning intent, and a warning question must
+    resolve to a place (named in the question, or supplied by the caller)
+    before this module answers anything.
     """
+    if EXPLANATORY.search(prompt):
+        return False
     text = prompt.lower()
     if re.search("|".join(WARNING_TERMS), text):
         return True
@@ -237,20 +255,26 @@ def warning_response(prompt: str, location: Optional[dict] = None) -> Optional[s
         geo = _geocode(asked_place)
         used_named_place = geo is not None
     if geo is None and location:
-        # No usable place in the question, so the caller's own location is the
-        # best available. Say so, rather than implying the named place was used.
+        # No usable place in the question, so the caller's own coordinates are
+        # the best available. LocationPayload carries lat/lon only — it has no
+        # name field — so the district is resolved by reverse geocoding rather
+        # than read off the payload. An earlier version read `location.name`
+        # and raised AttributeError, so "Any warning right now?" with a
+        # location crashed the request instead of answering it.
         geo = {
             "latitude": location.latitude,
             "longitude": location.longitude,
-            "name": location.name,
         }
     if geo is None:
-        return (
-            "I could not work out which place you mean. "
-            "Please name the district, for example \"Is there an IMD warning for Thrissur district?\"."
-        )
+        # No place named and none supplied. A warning question with nothing to
+        # look up is ambiguous, and the instruction is explicit: ambiguous goes
+        # to the agent, not to a lookup that cannot succeed. Returning None
+        # falls through.
+        return None
 
     lat, lon = geo.get("latitude"), geo.get("longitude")
+    if lat is None or lon is None:
+        return None
     admin = _reverse_geocode(float(lat), float(lon))
     district = (admin.get("district") or geo.get("admin1") or geo.get("name") or "").strip()
     region = admin.get("state") or ""
