@@ -1752,6 +1752,15 @@ export default function App() {
       setAlertsList([]);
       return;
     }
+    // P3-014: a restored location is a prior choice, not evidence of where the
+    // user is now. IMD warnings describe conditions at a place, so presenting
+    // them against a remembered location without that caveat would assert
+    // something about the user's current situation that we cannot support. The
+    // bulletin is withheld until a live fix or explicit choice replaces it.
+    if (locationState.status === 'restored') {
+      setAlertsList([]);
+      return;
+    }
     try {
       const r = await fetch(ALERTS_ENDPOINT(loc.name, toWeatherQuery(loc)), { signal });
       if (!r.ok) throw new Error(await describeHttpError(r));

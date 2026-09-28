@@ -1062,3 +1062,19 @@ header.top {
     width: 100%;
   }
 }
+/* P3-014 · the "saved from your last visit" marker.
+   Must read as an annotation on the pill, not as a second control, so it is
+   aria-hidden (the pill's accessible name already carries the meaning) and
+   styled to sit quietly beside the place name. */
+.location-saved-tag {
+  font-size: 10.5px;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 5px;
+  border-radius: var(--radius-chip);
+  background: var(--mist);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}

@@ -69,8 +69,20 @@ export type LocationState =
   | { status: 'none' }
   | { status: 'requesting-gps' }
   | { status: 'selected' }
+  /**
+   * The location came from localStorage, not from something the user just did
+   * (P3-014). It is a real prior choice, but it is NOT evidence of where the
+   * user is now, so the UI must label it as saved and must not present IMD
+   * warnings for it as though they were current conditions.
+   */
+  | { status: 'restored' }
   | { status: 'denied' }
   | { status: 'error' };
+
+/** True when the shown location is a restored prior choice, not a live one. */
+export function isRestoredState(state: LocationState): boolean {
+  return state.status === 'restored';
+}
 
 /**
  * Mount-time seed from the URL deep link ONLY. Nothing else may seed the
@@ -119,12 +131,24 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // (P2-004). Nothing here invents a location: there is still no default city,
   // and a stored value is re-validated by `sanitize()` on read. Resolved once
   // so `location` and `status` cannot disagree about what booted.
-  const [bootLocation] = useState<SelectedLocation | null>(
-    () => initFromUrl() ?? loadStoredLocation(),
+  //
+  // WHY the old "no localStorage read" rule was revised: that rule existed to
+  // stop a hardcoded city being shown as if it were live. Restoring the user's
+  // own last choice cannot do that, PROVIDED it is always labelled as saved and
+  // never treated as a current fix — which is what the `restored` status
+  // enforces, and why a restored location may not present IMD warnings on its
+  // own.
+  const [boot] = useState<{ location: SelectedLocation | null; restored: boolean }>(
+    () => {
+      const deepLink = initFromUrl();
+      if (deepLink) return { location: deepLink, restored: false };
+      const stored = loadStoredLocation();
+      return { location: stored, restored: stored !== null };
+    },
   );
-  const [location, setLocationState] = useState<SelectedLocation | null>(bootLocation);
+  const [location, setLocationState] = useState<SelectedLocation | null>(boot.location);
   const [status, setStatus] = useState<LocationState['status']>(
-    bootLocation ? 'selected' : 'none',
+    boot.location ? (boot.restored ? 'restored' : 'selected') : 'none',
   );
 
   // Distinguishes the mount-time auto-fill (only fills while nothing was
@@ -134,6 +158,11 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // Latest location readable inside async GPS callbacks.
   const locationRef = useRef(location);
   locationRef.current = location;
+
+  // Whether the current location is a restored prior choice rather than
+  // something the user just did (P3-014). A ref, not state: the GPS callbacks
+  // need to read it without re-subscribing, and a successful fix clears it.
+  const restoredRef = useRef(boot.restored);
 
   const setLocation = useCallback<LocationContextValue['setLocation']>((patch) => {
     setLocationState((prev) => {
@@ -149,6 +178,9 @@ export function LocationProvider({ children }: { children: ReactNode }) {
       if (!prev) return prev;
       return sanitize({ ...prev, ...next, source: next.source ?? prev.source }) ?? prev;
     });
+    // An explicit selection is a live choice, so the saved marker must not
+    // survive it.
+    restoredRef.current = false;
     setStatus('selected');
   }, []);
 
@@ -163,41 +195,92 @@ export function LocationProvider({ children }: { children: ReactNode }) {
       (p) => {
         const lat = p.coords.latitude;
         const lon = p.coords.longitude;
+        // Read BEFORE mutating: the state updater runs later, by which point
+        // the ref has already been cleared.
+        const wasRestored = restoredRef.current;
         setLocationState((prev) => {
-          // Auto-fill must never overwrite a selection the user made while
-          // the GPS call was in flight; an explicit pill click always wins.
-          if (!explicit && prev) return prev;
+          // The guard exists to protect a selection the user made THIS session
+          // from being overwritten by a slow auto-fill. A restored location is
+          // not that: it is prior evidence, and a fresh fix must be able to
+          // replace it. Without this the refresh cleared the saved marker while
+          // keeping the old coordinates, i.e. it claimed to be live without
+          // being live.
+          if (!explicit && prev && !wasRestored) return prev;
           return sanitize({ latitude: lat, longitude: lon, source: 'gps' });
         });
+        // A real fix is live evidence of where the user is, so the saved
+        // marker clears even when the coordinates end up unchanged.
+        restoredRef.current = false;
         setStatus('selected');
-        void reverseGeocodeLabel(lat, lon).then((name) => {
+        void reverseGeocode(lat, lon).then(({ name, district, state, country }) => {
           if (name === 'Selected point') return;
-          // Only fill the name if the fix still matches the current location.
+          // Only fill the administrative pieces if the fix still matches the
+          // current location.
+          //
+          // `reverseGeocode` is used rather than the label-only helper because
+          // `country` is what gates India-only services: filling only the name
+          // left a GPS fix with no country, so `isInIndia` was always false and
+          // a user standing in India could never receive IMD warnings.
           setLocationState((prev) =>
             prev && prev.latitude === lat && prev.longitude === lon
-              ? sanitize({ ...prev, name })
+              ? sanitize({ ...prev, name, district, region: state, country })
               : prev,
           );
         });
       },
       (err) => {
         const denied = err?.code === PERMISSION_DENIED_CODE;
-        setStatus(() => (locationRef.current ? 'selected' : denied ? 'denied' : 'error'));
+        // A failed refresh must not demote a usable location. If one exists it
+        // stays, and a restored one stays marked restored: the user still has
+        // not given us a current fix.
+        setStatus(() => (locationRef.current ? (restoredRef.current ? 'restored' : 'selected') : denied ? 'denied' : 'error'));
       },
       GPS_OPTIONS,
     );
   }, []);
 
-  // Auto-fill once on mount: requesting-gps → selected / denied / error.
-  // Never yields a fake location — failure leaves location null. Deep-link
-  // sessions skip the auto-fill because a location already exists (url).
+  /**
+   * Mount behaviour (P3-014).
+   *
+   * With no location at all, ask once as before. With a restored one, only
+   * refresh if permission has ALREADY been granted — a fresh fix is better
+   * evidence than storage, so it wins when it arrives, and the `restored` flag
+   * clears with it. Crucially, `permissions.query()` is a silent status check:
+   * it never shows a prompt, so restoring a location can never surprise the
+   * user with a permission dialog they did not ask for.
+   */
   useEffect(() => {
-    if (locationRef.current) return;
-    runGpsRequest(false);
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+
+    if (!locationRef.current) {
+      runGpsRequest(false);
+      return;
+    }
+    if (!boot.restored) return; // deep link: leave it alone
+
+    let cancelled = false;
+    navigator.permissions
+      ?.query({ name: 'geolocation' })
+      .then((result) => {
+        if (cancelled || result.state !== 'granted') return;
+        runGpsRequest(false);
+      })
+      .catch(() => {
+        /* Permissions API unavailable: keep the restored location, still
+           labelled as saved. Silent by design. */
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const requestGpsLocation = useCallback(() => runGpsRequest(true), [runGpsRequest]);
+  const requestGpsLocation = useCallback(() => {
+    // An explicit click is the user asking for a current fix, so whatever we
+    // had is replaced and the saved marker must not survive it.
+    restoredRef.current = false;
+    runGpsRequest(true);
+  }, [runGpsRequest]);
 
   const locationKey = locationKeyOf(location);
 

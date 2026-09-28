@@ -35,8 +35,16 @@ export default function AppHeader({
   onToggleDrawer,
 }: AppHeaderProps) {
   // Truthful pill copy for every LocationState discriminant.
+  //
+  // P3-014: a location restored from localStorage is a real prior choice but
+  // NOT evidence of where the user is now, so it is named as saved. Showing it
+  // as though it were a live fix is exactly the failure the original "no
+  // default city" rule existed to prevent.
+  const isRestored = locationStatus === 'restored';
   const pillLabel = locationName
-    ? locationName
+    ? isRestored
+      ? `${locationName}, saved from your last visit`
+      : locationName
     : locationStatus === 'requesting-gps'
       ? 'Finding your location…'
       : locationStatus === 'denied' || locationStatus === 'error'
@@ -51,8 +59,9 @@ export default function AppHeader({
    * "Use my location" there would promise an action the control does not
    * perform, which is the same dead-control problem in a different form.
    */
-  const pillAction =
-    locationStatus === 'denied'
+  const pillAction = isRestored
+    ? 'Use my current location instead'
+    : locationStatus === 'denied'
       ? 'Search for a location'
       : locationStatus === 'error'
         ? 'Retry my location'
@@ -82,9 +91,13 @@ export default function AppHeader({
            does anything. Naming the action is what makes the control usable
            without sight; the state is still conveyed visually. */
         aria-label={pillAction}
+        data-location-restored={isRestored ? 'true' : 'false'}
       >
         <MapPin />
         <span>{pillLabel}</span>
+        {isRestored && (
+          <span className="location-saved-tag" aria-hidden="true">saved</span>
+        )}
       </button>
 
       <div className="lang-toggle" role="group" aria-label="Language">
