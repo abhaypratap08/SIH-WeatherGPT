@@ -415,3 +415,181 @@ Status codes 503/502/400–422 and transport failures now produce distinct,
 specific messages. The backend detail is logged for operators only. This follows
 the requirement to distinguish failure classes and is not a design decision, but
 the copy wording is a product surface if you want to change it.
+
+---
+
+# Mobile audit — decisions (2026-09-28)
+
+Subjective mobile findings from the phone-viewport audit. Objective defects were
+fixed without asking (see QA_REPORT.md). These need a product call.
+
+## UX-001 — The chat has no route, so the phone Back button exits the app
+
+Problem: the app is a single page with no URL routing. All nine views render at
+`/`, and the assistant is the landing view with no drawer destination of its own.
+Every other view offers a "Back to chat" control, so nothing is a dead end inside
+the app — but the hardware/gesture Back does not go "back", it leaves.
+
+Evidence:
+- `page.url()` identical (`/`) on all nine drawer destinations.
+- `page.goBack()` from any view lands on `about:blank` with an empty document.
+- Measured, not inferred. See `docs/qa-evidence/mobile-390x844-*.png`.
+
+Affected users: every Android user, and iOS users who swipe back. On Android the
+Back gesture is a primary navigation affordance, so the most-used way out of a
+sub-view exits the product and discards the session. A user who taps Back by
+reflex lands on a blank page and may assume the app crashed.
+
+Why it matters: this is the one finding that can lose a session. Everything else
+is friction; this is a dead end with no way back except re-launching.
+
+My product judgment: fix it. Add hash routing so each view has an address, the
+Back gesture walks the view history, and a re-launch restores the last view. This
+is the standard remedy and it also makes the app linkable, which matters for a
+government-project pilot where a supervisor sends a colleague "open the radar
+view". Confidence: HIGH that it is a real problem; MEDIUM that the fix is worth
+the complexity at this stage of the project.
+
+A — RECOMMENDED
+Exact change: hash routing — `#/`, `#/map`, `#/radar`, `#/alerts`, `#/nwp`,
+`#/sectors`, `#/climate`, `#/route`, `#/report`. Back/Forward walk the views.
+Deep-linking a view restores it on load; an unknown hash falls back to `#/`.
+Why: restores the platform's primary navigation affordance, makes views
+shareable, and needs no server change.
+Trade-offs: introduces a second source of truth alongside React state, so view
+changes must go through one setter or the two will drift. Roughly a day of work
+and a new place for regressions. Existing deep links do not exist to preserve.
+Implementation scope: `App.tsx` (view state), a small `useHashRoute` hook, the
+drawer items, and tests for Back/Forward and a bad hash.
+
+B — CONSERVATIVE
+Exact change: keep the single route, but intercept the Back gesture and walk an
+in-app view stack held in state, pushing the previous view instead of leaving.
+Why: no URL surface to get wrong, no deep links, smallest change that stops the
+data loss.
+Disadvantages: Back still leaves the app from the landing view; views remain
+unshareable; the interception is invisible magic that will surprise anyone who
+inspects the URL bar, and it is a browser behaviour users can defeat by other
+means.
+
+C — ALTERNATIVE
+Exact change: leave navigation as it is and add a persistent bottom tab bar, so
+every view is one tap away and Back is not needed for in-app movement.
+Why: the most conventional mobile pattern, and it removes the reliance on Back
+entirely.
+Disadvantages: five to seven destinations is too many for a bottom bar at 390px
+(it would need truncation or a "More" tab), it consumes vertical space already
+tight on a 375x667 screen, and it does nothing for the iOS swipe-back habit.
+Highest cost of the three.
+
+Decision required: A / B / C
+
+## UX-002 — The assistant is the landing view but not in the drawer
+
+Problem: the nine drawer destinations are Forecast, Map, Radar, Alerts, NWP,
+Sectors, Climate, Route, Report. The chat — the product's actual interface, and
+the only view with a text input — is not among them.
+
+Evidence: measured from the rendered drawer at 390x844 and 375x667
+(`mobile-390x844-drawer.png`); the same nine items in both. The chat is reached
+only by the "Back to chat" control on other views or by a reload.
+
+Affected users: anyone who wants to ask a question after browsing a map, and
+anyone using the drawer as their mental model of the app.
+
+Why it matters: the drawer is how a person learns what the app can do. The one
+thing it cannot do — ask a question — is missing from that list, so the product
+does not advertise its own primary capability. A user who opens the drawer
+looking for "ask" concludes the app has no chat.
+
+My product judgment: add it. One list item, no layout risk (all nine items
+already fit at 375px with room to spare, and a tenth at 47px still fits in the
+844px and 667px viewports I measured). Confidence: HIGH that the current state
+misrepresents the product; MEDIUM that anyone finds the "Back to chat" control
+without it.
+
+A — RECOMMENDED
+Exact change: add "Ask WeatherGPT" as the first drawer item, with the chat
+iconography already used by the "Back to chat" control, and mark it as the
+active item whenever the chat is showing.
+Why: the drawer becomes an accurate map of the product; one tap instead of
+searching; the active state answers "where am I", which the drawer currently
+never does for any view.
+Trade-offs: ten items rather than nine; the list is already at ~580px of a
+667px viewport, so a 375x667 phone now has almost no spare room if a future
+destination is added. Low risk, easy to reverse.
+Implementation scope: `MobileDrawer.tsx` item list plus the active-state
+treatment, and a test asserting the item is present and navigable.
+
+B — CONSERVATIVE
+Exact change: change the drawer's existing header so the brand block is a
+button to the chat, and label the current "Back to chat" controls more
+prominently.
+Why: no new list item, so no crowding, and it makes the chat reachable from
+the one place the eye already goes.
+Disadvantages: a hidden affordance. Someone scanning the list of destinations
+still sees no chat, and the primary capability stays invisible in the
+information architecture — the actual complaint.
+
+C — ALTERNATIVE
+Exact change: put "Ask WeatherGPT" at the top of every view as a persistent
+primary button, and leave the drawer unchanged.
+Why: makes the primary action obvious from anywhere, which is the strongest
+possible answer to "can I ask a question here".
+Disadvantages: a persistent button on nine views competes with each view's own
+primary action, which is a real hierarchy cost on the map and route forms, and
+it adds a control to the tightest layouts. I do not recommend it.
+
+Decision required: A / B / C
+
+## UX-003 — How a 503 is worded depends on whether the operator should be told
+
+Problem: the daily-cap message is now the backend's own text shown verbatim to
+the user, which is a clear improvement on the false "not configured" claim. But
+it reads as a status line: "The AI assistant has reached its daily limit and
+resets at 29 Sep 2026, 05:30 IST. Weather, forecasts and warnings still work."
+
+Affected users: anyone who hits the limit, which is every user once 50 requests
+are spent in a day.
+
+Why it matters: the message is honest but has no idea what to do next, and it
+leads with a limitation rather than what the app can still do for them. For a
+pilot where a supervisor shares one key across several users, "you are blocked
+until tomorrow" without "here is what still works, and here is how to avoid
+this" will read as a broken product.
+
+My product judgment: keep the honest cause and reset time (never remove them),
+but lead with what still works and add one concrete next step. Confidence:
+MEDIUM-HIGH that this is better for the pilot; MEDIUM on exact wording, which is
+why this is a decision rather than a unilateral edit.
+
+A — RECOMMENDED
+Exact change: keep the cause and the reset time, reorder to lead with capability
+and name one specific next step, e.g. "Forecasts, warnings and the map are all
+working. Questions are paused until 29 Sep, 05:30 IST because this server's
+daily limit is used up. For a forecast, tap Map or the report page."
+Why: the user learns what they can still do before what went wrong, and gets an
+action rather than a deadline. Preserves every fact the current text has.
+Trade-offs: longer. A chat bubble that is four sentences tall is worse than one
+that is two, so the next step must earn its place.
+Implementation scope: `ML/main.py` (the daily-cap `detail`), plus the E5-E10
+assertions updated to match.
+
+B — CONSERVATIVE
+Exact change: leave the current wording exactly as it is.
+Why: it is already honest, names the reset time, and says what still works.
+Every rewrite risks losing a fact, and the next agent-driven pass will revisit
+this copy anyway.
+Disadvantages: leads with the failure, offers no next step, and reads like a
+service status page rather than an assistant.
+
+C — ALTERNATIVE
+Exact change: shorten to one sentence and drop the reset time, e.g. "Questions
+are paused for now, but forecasts, warnings and the map all work."
+Why: the shortest message that is still true, and the reset time moves to a
+badge near the composer where it does not have to be read twice.
+Disadvantages: a user who wants to know when it works again has to hunt for the
+badge, and the time is the single most useful fact in the message. I do not
+recommend discarding it.
+
+Decision required: A / B / C

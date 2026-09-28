@@ -1757,3 +1757,244 @@ deleted.
   the model's fabrication behaviour.
 - F-2 / RT-06 open, with no mechanical mitigation available.
 - F-3 open, awaiting your decision.
+
+---
+
+# Mobile audit — phone viewports (2026-09-28)
+
+A mobile-first audit run after the two reported bugs. Nine routes, driven by
+touch in a real browser at 390x844, 375x667, 360x800, 768x1024 and 1440x900.
+
+## Environment
+
+System Chromium via Playwright's `executablePath` (the Playwright browser cache
+is absent on this machine and must not be downloaded), `isMobile` + `hasTouch`,
+iPhone user agent, `en-IN`. App loaded at `http://localhost:5173` — the origin a
+user actually uses, and the one the Java backend's CORS config allows.
+
+Harness: `/tmp/opencode/qa/mobile/`. Evidence: `docs/qa-evidence/mobile-*.png`.
+Seven services were restarted mid-audit after a host restart; that is
+environmental, not a product finding.
+
+## What passed, measured
+
+- **Horizontal overflow: 0px at every viewport** (360/375/390/768/1440) across
+  landing, map, route and report.
+- **Contrast: 0 failures** against WCAG AA 4.5:1 across five views in light and
+  dark themes. All 14-15 text nodes per view pass.
+- **Text scaling: no overflow at 100%, 150% or 200%** root font size.
+- **Reduced motion: honoured.** The drawer slide collapses to 0s. The 37
+  remaining transitions are 0.15s colour/opacity changes, not motion; 3
+  involve transform/max-height and are the chat icon buttons and warning
+  bulletin, both brief and non-parallax.
+- **Accessible names: 0 unlabelled controls** on all nine views.
+- **Form labels: correct.** Route inputs have real `<label>` elements; the report
+  search has a visually hidden `label[for]`. P2-008 regression holds.
+- **Send button: correct in all 7 cases.** Disabled for empty, single space,
+  five spaces, tabs, and zero-width space; enabled for one real character. Five
+  rapid taps produce exactly 1 request.
+- **No horizontal-scroll traps in the map.** Leaflet's tile container overflows
+  by design and is clipped; the page itself does not scroll.
+- **XSS probes clean.** `<b>delhi</b>`, `<script>`, and emoji in the city field
+  produce no injected tags, no executed script.
+- **P1-002 regression holds.** "Kochi" returns a labelled disambiguation list
+  (Kochi/Kerala/India vs Kochi/Japan) with coordinates.
+- **P3-013 regression holds.** Body scroll locks while the drawer is open.
+- **Ambigous city names do not resolve silently.** P1-002 behaviour confirmed on
+  mobile.
+- **Every view has exactly one `h1`.** P2-010 regression holds.
+
+## Findings
+
+### M-001 · P1 · COPY/CLARITY · confidence HIGH · status FIXED
+
+The chat told users the assistant "has not been configured on this server" when
+the real cause was an exhausted daily model allowance — and discarded the reset
+time, the only actionable fact in the response.
+
+- **Route:** `/` (chat) · **Viewport:** 390x844 · **Persona:** impatient user
+- **Reproduction:** open the chat, ask any question that needs the model.
+- **Expected:** the reason the assistant is unavailable, and when it changes.
+- **Observed:** "The weather assistant is not available right now — it has not
+  been configured on this server. Please try again later." The backend's actual
+  response was "The AI assistant has reached its daily limit and resets at 29
+  Sep 2026, 05:30 IST. Weather, forecasts and warnings still work."
+- **Root cause:** `AIChatWorkspace.tsx` read `detail` from the error body, logged
+  it, then substituted a hardcoded string per status code. A 503 covers two very
+  different failures (no key, allowance spent) and the frontend picked the wrong
+  one for both. Disclosed as "operators only" in a comment; the detail was
+  authored for users.
+- **Fix:** use `detail` when present; keep per-status strings as the fallback for
+  a detail-less response. Also softened two backend details that leaked internals
+  to the user (`OPENROUTER_API_KEY` name, exception class name).
+- **Evidence:** `mobile-390-fixed-error-message.png` — the phone now shows the
+  reset time.
+- **Verification:** 19/19 browser assertions; 19 new suite assertions (E1-E19)
+  driving the real handler; mutation check fails 1, 1, 2, 1 for the four
+  reversions.
+
+### M-002 · P2 · ACCESSIBILITY · confidence HIGH · status FIXED
+
+Six touch targets were below the WCAG 2.5.8 24px minimum, four below 18px.
+
+- **Route:** all · **Viewport:** 360-1440 (identical at every size)
+- **Observed:** language options "EN" 27x23 and "हिं" 22x23; footer "Privacy
+  Policy" 73x17 and "Terms of Use" 70x17; Leaflet attribution links 43x11 and
+  71x11.
+- **Impact:** a 22x23 target is a coin flip with a thumb. The footer links and
+  the map attribution are the least likely controls to be hit deliberately and
+  the hardest to hit accurately.
+- **Fix:** `frontend/src/styles/mobile-targets.css` — padding with matching
+  negative margin, so the visual size and the header height are unchanged. Now
+  31x31, 26x31, 77x31, 74x31, 49x24, 77x24.
+- **Note:** Leaflet attribution is OSM's licence requirement. It stays visible
+  and on-screen; only its hit area grew.
+- **Verification:** 0 controls under 24px remaining; header height 131px
+  unchanged; attribution still visible and inside the viewport.
+
+### M-003 · P2 · RESPONSIVENESS · confidence HIGH · status FIXED
+
+Every form input was 14px. iOS Safari zooms the page on focus below 16px and the
+user cannot zoom back out, leaving them magnified and scrolled with no obvious
+way out.
+
+- **Route:** `/route`, `/report` · **Viewport:** 390x844, 375x667
+- **Expected:** focusing a field does not change the zoom level.
+- **Observed:** `font-size: 14px` on the route form's three inputs and the
+  report search, from the shared `S.input` style object.
+- **Fix:** 16px at ≤720px, desktop density untouched (verified 14px at 1440).
+- **Verification:** route inputs 16px, report input 16px, desktop 14px.
+
+### M-004 · P1 · NAVIGATION · confidence HIGH · status OPEN — decision UX-001
+
+No URL routing. All nine views live at `/`, so the phone Back button leaves the
+app instead of returning to the previous view.
+
+- **Reproduction:** open any view, press Back.
+- **Expected:** return to the previous view.
+- **Observed:** `about:blank`, empty document. Confirmed after 4 attempts.
+- **Impact:** on Android the Back gesture is a primary affordance. This is the
+  only finding that can lose a session.
+- **Mitigating:** every view has a "Back to chat" control, so there is no
+  in-app dead end — the loss happens only via Back.
+- **Status:** needs a product decision. See `QA_DECISIONS.md` UX-001.
+
+### M-005 · P2 · UX/INFORMATION ARCHITECTURE · confidence HIGH · status OPEN — decision UX-002
+
+The drawer lists nine destinations and none of them is the chat — the product's
+only text input and the feature the app is named for.
+
+- **Evidence:** measured drawer contents at 390x844 and 375x667; identical nine
+  items. `mobile-390x844-drawer.png`.
+- **Impact:** the drawer is how a user learns what the app can do, and the
+  capability it most needs to advertise is missing from it. The drawer also
+  never marks the current view, so "where am I" is unanswered on all nine.
+- **Status:** needs a product decision. See `QA_DECISIONS.md` UX-002.
+
+### M-006 · P3 · COPY/CLARITY · confidence MEDIUM · status OPEN — decision UX-003
+
+The daily-limit message is now honest but reads as a status line and offers no
+next step. Wording is a product call.
+
+- **Status:** needs a product decision. See `QA_DECISIONS.md` UX-003.
+
+### Not defects — verified and retracted
+
+Recording these because each looked like a finding first, and a report that
+hides its own false alarms cannot be trusted on the ones it keeps.
+
+| Claim | Why retracted |
+| --- | --- |
+| 36% of the menu button is dead | The button is a 44x44 circle; a 9x9 grid counts the transparent corners. Real taps at (18,36) and (38,16) both opened the drawer. Detector now honours `border-radius`. |
+| Whitespace-only input enables Send | The test read `disabled` in the same tick as the input event, before React re-rendered. Re-tested with settled reads across 7 cases: correct. |
+| The map's empty-state panel blocks "tap the map" | `elementFromPoint` at the map centre reaches the Leaflet container, and a real tap selected a location ("Selected point"). |
+| The Overview layer is unresponsive | It was already the active layer, so no state change is correct. Re-tested away-and-back across 6 transitions: all toggle. |
+| The radar view is broken (0 canvases) | The honest "No precipitation detected" state. Verified `fetchRadarFrames` is built from Open-Meteo hourly grid data, and no rain is reported at the tapped point. A previous desktop pass "passed" a radar check while measuring 0 panels. |
+| City search does nothing | The selector matched the header's location pill, not the report form's "Get weather" button. |
+| Console CORS failure on the IMD endpoint | I loaded `127.0.0.1:5173` while the backend allows `localhost`. At `localhost` there are 0 console errors and the endpoint returns 200. |
+| A 503 carries no detail | `urllib` raises a 503 as `HTTPError`; the detail was in the body the test discarded. Reading the error path fixed the test, not the product. |
+| 37 elements animate under reduced motion | All are 0.15s colour/opacity transitions. The one real slide (drawer) is correctly suppressed. |
+| `sr-only` elements show clipped text | Deliberately 1px with `overflow: hidden`. Detector now excludes them. |
+
+## Coverage and limits
+
+Tested: all nine routes, both themes, five viewports, touch (edge taps, double
+taps, rapid taps, taps during loading, adjacent controls), forms with an
+emulated keyboard (viewport reduced to 390x504, which is what a browser does
+when the keyboard opens), interruption (navigate away mid-request, back,
+refresh), map layers individually, reduced motion, text scaling to 200%.
+
+NOT tested, and not claimed:
+
+- **No real assistive technology.** No NVDA, TalkBack or VoiceOver. Accessible
+  names, roles and contrast are verified; actual announcement is not.
+- **No real touch hardware.** Synthetic touch events via Playwright. Hit-target
+  *sizes* are measured exactly; thumb accuracy is not.
+- **No real on-screen keyboard.** Emulated by shrinking the viewport height.
+  Safari's zoom-on-focus (M-003) is inferred from the documented 16px threshold,
+  not observed in Safari.
+- **Radar imagery not observed rendering.** No precipitation was available to
+  draw, so the drawing path is untested on a real frame.
+- **No load, latency or battery testing.** Network conditions were not varied.
+- **Not tested on a real phone.** No device was available; viewports were
+  emulated.
+- **Chat answers are unverified end to end.** The 50/day allowance is spent, so
+  the model path returns 503. The honest-error fix is verified; answer quality is
+  not.
+
+This is a local audit on a developer machine. It is not evidence of
+production readiness, and a passing run here says nothing about a real handset
+on a slow network.
+
+### M-007 · P2 · ACCESSIBILITY · confidence HIGH · status FIXED
+
+The map's location dot was a 12x12 focusable element with `role="button"` and
+**no accessible name**, on both the map and radar views.
+
+- **Route:** `/map`, `/radar` · **Viewport:** 375x667 · **Persona:** screen-reader
+  or keyboard user
+- **Reproduction:** set a location, open Map or Radar, press Tab.
+- **Expected:** either a named control that does something, or no control at all.
+- **Observed:** `<div class="leaflet-marker-icon" role="button" tabindex="0">`
+  containing only `<div class="map-loc-dot">`, 12x12, accessible name empty.
+  A keyboard user tabbed onto a control that announced as the bare word
+  "button" and did nothing on activation.
+- **Root cause:** `interactive: false` correctly says the app wants no taps, but
+  Leaflet still applies its default `role="button"` and `tabindex="0"`. The
+  marker was created with neither `keyboard: false` nor any label.
+- **Why the route sweep missed it:** the dot only exists once a location is set.
+  A route-by-route walk from a cold load never sees it. It surfaced only when
+  the regression pass arrived at the map *after* a city search.
+- **Fix:** `keyboard: false` on both markers, plus `alt`/`title` naming the
+  place. The dot is now `role=None`, `tabindex=None`, out of the tab order, and
+  named "Thrissur, Kerala, India".
+- **Verification:** `ML/test_map_dot_a11y.py`, 4/4, in a real browser with a
+  location set. Re-ran the 375x667 regression: the anomaly is gone.
+
+## Verification summary
+
+| Check | Command | Result |
+| --- | --- | --- |
+| ML suites (8) | `python <suite>.py` in `ML/` | 40+29+19+18+32+64+17+4 = **223 passed, 0 failed** |
+| Frontend types | `npm run typecheck` | exit 0 |
+| Frontend lint | `npm run lint` | exit 0, 0 errors (64 pre-existing warnings) |
+| Frontend tests | `npm test` | 21 passed, 0 failed |
+| Frontend build | `npm run build` | exit 0 |
+| Browser fixes | `mobile/verify_fixes.mjs` | 19/19 |
+| Browser regression | `mobile/regress.mjs` | 25/25 across 9 routes, 2 viewports, both themes |
+| Map dot a11y | `ML/test_map_dot_a11y.py` | 4/4 |
+| API safety | `scripts/verify-api-safety.sh` | 7/7 (unchanged) |
+
+Mutation checks (each reverts one fix in isolation and requires the suite to
+fail): the M-01 assertions fail 1, 1, 2, 1 for the four reversions. The
+M-001/M-002/M-004 assertions from the previous round fail 5, 2, 4, 3
+respectively. No fix in this round is protected only by a test that passes
+either way.
+
+## Branch state
+
+Four commits on `qa-remediation-and-safety` from this audit, not merged, not
+pushed. `main` unchanged at `96b6ea1`. Working tree clean apart from untracked
+evidence screenshots. No secrets in any commit: the key-shaped tripwire used in
+the ML tests was reshaped to `QA-CANARY-...` earlier in the session precisely so
+it would not match a credential pattern.
