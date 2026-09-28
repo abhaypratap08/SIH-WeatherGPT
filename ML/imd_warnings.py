@@ -194,6 +194,60 @@ def _is_in_india(country: Optional[str]) -> bool:
     return isinstance(country, str) and country.strip().lower() == "india"
 
 
+def _resolve_district(lat, lon, geo: dict, asked_place: Optional[str]):
+    """
+    Find something to CALL this place, preferring the administrative district.
+
+    Returns `(name, source)`. The order matters: a warning is issued for a
+    district, so a district beats a city, a city beats a state, and a state
+    beats nothing. `source` records which, so a reader can tell a real district
+    from a fallback.
+
+    Returns `("", "")` when nothing could be resolved. The caller must treat
+    that as UNKNOWN, never as "no warning".
+    """
+    admin = _reverse_geocode(float(lat), float(lon))
+    for key in ("district", "city_district"):
+        v = (admin.get(key) or "").strip()
+        if v:
+            return v, "district"
+    for src, keys in ((geo, ("name",)), (admin, ("city", "town", "village", "county"))):
+        for k in keys:
+            v = (src.get(k) or "").strip()
+            if v:
+                return v, "city"
+    v = (admin.get("state") or geo.get("admin1") or "").strip()
+    if v:
+        return v, "state"
+    v = (asked_place or "").strip()
+    if v:
+        return v, "asked"
+    return "", ""
+
+
+def _require_name(name: str, source: str, asked_place: Optional[str] = None) -> str:
+    """
+    Return a non-blank place name, or fail the response build.
+
+    A hard guard, not a tidy-up. The bug it prevents was an answer reading
+    "No active IMD warning for  as of ...", which looks absurd but is genuinely
+    dangerous: a user cannot tell the district was never identified, so a blank
+    reads as a check that came back clean. Substituting a placeholder would
+    hide the same failure. Raising surfaces it and turns an unfounded
+    assurance into a visible error.
+    """
+    candidate = (name or "").strip()
+    if candidate:
+        return candidate
+    fallback = (asked_place or "").strip()
+    if fallback:
+        return fallback
+    raise ValueError(
+        "refusing to build a warning answer with a blank place name "
+        f"(source={source!r}); the district was never identified"
+    )
+
+
 def fetch_warnings(lat: float, lon: float, name: str) -> dict:
     """
     Ask the Java backend for warnings at a coordinate.
@@ -275,24 +329,47 @@ def warning_response(prompt: str, location: Optional[dict] = None) -> Optional[s
     lat, lon = geo.get("latitude"), geo.get("longitude")
     if lat is None or lon is None:
         return None
+
+    # Resolve the district, and if that fails, resolve SOMETHING nameable. The
+    # reported bug was "No active IMD warning for  as of ...": a location
+    # chosen by city search can arrive with coordinates but no district (the
+    # frontend's resolveDistrict() swallows any reverse-geocode failure), and
+    # this code then reverse-geocoded again, got nothing, and formatted an
+    # empty string into a sentence that asserts no warning.
+    district, label_source = _resolve_district(lat, lon, geo, asked_place)
+
+    if not district:
+        # Coordinates in hand but no identifiable district. Saying "no active
+        # warning" would assert a fact about a place we failed to identify,
+        # which is the same class of error as reporting a failed fetch as an
+        # absence. Say what is true, and offer the way out.
+        return (
+            "I could not identify which district these coordinates fall in, so I "
+            "cannot complete an IMD warning check for them. I am not going to "
+            "guess and tell you there is no warning. Please search for your city "
+            "or district by name, and I will check that instead."
+        )
+
     admin = _reverse_geocode(float(lat), float(lon))
-    district = (admin.get("district") or geo.get("admin1") or geo.get("name") or "").strip()
     region = admin.get("state") or ""
     country = (admin.get("country") or geo.get("country") or "").strip()
 
+    # A district that resolved is a name. Never build a sentence around a blank.
+    place_label = _require_name(district, label_source, asked_place)
+
     if not _is_in_india(country):
         return (
-            f"{district or asked_place or 'That location'} is not in India. "
+            f"{place_label} is not in India. "
             "IMD publishes weather warnings for districts in India only, so there is no "
             "Indian warning to report there. Weather for that place is still available."
         )
 
-    result = fetch_warnings(float(lat), float(lon), district or (asked_place or ""))
+    result = fetch_warnings(float(lat), float(lon), district)
 
     # A failed fetch must NEVER become "no warning".
     if not result["ok"]:
         return (
-            f"I could not complete the IMD warning check for {district or 'that district'} "
+            f"I could not complete the IMD warning check for {place_label} "
             f"just now ({result['reason']}). "
             "I am not going to guess: please retry in a moment, or check the IMD warnings page."
         )
@@ -300,7 +377,7 @@ def warning_response(prompt: str, location: Optional[dict] = None) -> Optional[s
     alerts = result["alerts"]
     if not alerts:
         return (
-            f"No active IMD warning for {district} as of {_ist_now()}."
+            f"No active IMD warning for {place_label} as of {_ist_now()}."
         )
 
     lines = []
@@ -313,8 +390,9 @@ def warning_response(prompt: str, location: Optional[dict] = None) -> Optional[s
         source = (a.get("source") or "IMD").strip()
         issued = (a.get("issuedAt") or a.get("issueTime") or a.get("issued") or "").strip()
         head = f"[{sev or 'UNKNOWN'}/{tier}] {title}"
-        if district:
-            head += f" for {district}"
+        # place_label is guaranteed non-blank by _require_name above, so the
+        # header can never read "for " with nothing after it.
+        head += f" for {place_label}"
         parts = [head]
         if body:
             parts.append(body)
