@@ -770,12 +770,21 @@ packages:
 | Package | Needed for | Notes |
 |---|---|---|
 | `python-multipart` | `/stt/transcribe` request parsing | tiny, pure Python |
-| `openai-whisper` | speech-to-text | **pulls PyTorch — a multi-GB download** |
+| `openai-whisper` | speech-to-text | **pulls PyTorch — install the CPU build first** |
 | `gTTS` / `pyttsx3` | text-to-speech | small |
 
-`./start.sh setup` installs these for you, because a documented setup step
-should leave you with a project that actually runs. The large PyTorch download
-is the reason you might not want that.
+**Install torch CPU-only first, then the rest.** This project transcribes CPU
+audio and never uses CUDA, but the default torch pulls multi-gigabyte CUDA
+wheels, and installing it with a download cache failed here with
+`OSError: [Errno 122] Disk quota exceeded` while `df` reported 400 GB+ free:
+
+```bash
+pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+pip install --no-cache-dir -r voice_service/requirements.txt
+```
+
+`./start.sh setup` does exactly this, in this order. Transcription also needs a
+system `ffmpeg` on `PATH`; `start.sh` does not install system packages.
 
 **To install them by hand instead:**
 

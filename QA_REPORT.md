@@ -1181,3 +1181,147 @@ Worth noting as a process lesson: two earlier `pkill` calls were part of compoun
 shell commands that received SIGTERM before reaching the `pkill`, so the stale
 process survived several rounds unnoticed and only surfaced because a boolean
 contradicted a direct check of its environment.
+
+---
+
+# Remediation log — voice setup, port guard, end-to-end warning test
+
+## Quota findings
+
+No quota reporting is available to this session, so the ceiling could not be
+read directly.
+
+| Probe | Result |
+|---|---|
+| `quota`, `repquota`, `xfs_quota` | none installed |
+| Filesystem | **btrfs** on `/dev/mapper/root[/@home]`, `compress=zstd:3` |
+| btrfs qgroup reporting | `btrfs` tool absent |
+| cgroup storage limit | none (`memory.max=max`, no `blkio`/`io.max`) |
+| `df` on `/home` | 71G of 475G used, **402G available** |
+| `du $HOME` | 38G, of which `~/.cache` is 13G |
+
+**EDQUOT is not reproducible by writing to `$HOME`.** A first probe appeared to
+show no ceiling at all, up to 58G apparent, and even 8G of `/dev/urandom`
+registered a 0MB `df` delta. Both results were measurement artefacts:
+btrfs compression makes a run of zeros nearly free, and subvolume accounting
+does not surface in `df` the way the probe assumed. The honest conclusion is
+narrower than "there is no quota": **the limit is enforced somewhere this
+session cannot inspect, and it is not disk exhaustion.** The most likely
+trigger is the peak, not the total: the CUDA wheels plus their extraction plus
+a populated download cache, all at once.
+
+Reclaimable space identified, none of it taken: `~/.cache/pip` 307MB,
+`~/.cache/uv` 1.1G, `~/.cache/puppeteer` 912M, `~/.cache/BraveSoftware` 2.8G.
+
+## Voice setup: SUCCEEDED, quota-aware
+
+| Step | Result |
+|---|---|
+| Purge `~/.cache/pip` | 320.6 MB, 178 files, 360 dirs |
+| Remove leftover `/tmp/pip-*` | 5 orphaned dirs from the failed run |
+| CPU-only torch, `--no-cache-dir`, PyTorch CPU index | **torch 2.14.0+cpu**, 772 MB |
+| Rest of `voice_service/requirements.txt`, `--no-cache-dir` | `openai-whisper`, `gTTS`, `pyttsx3`, `numba` and deps |
+| `ffmpeg` | **present**, n9.0.2 at `/usr/bin/ffmpeg` (not installed by me) |
+
+`.venv` grew 461M → 2.5G. `torch.cuda.is_available()` is `False` and
+`torch.version.cuda` is `None`, confirming the CPU build rather than CUDA.
+`pip check` reports no broken requirements.
+
+The CPU-first ordering is now the default in `./start.sh setup`, with the
+reason recorded in the script and one line in README section 3a.
+
+## A second regression I had introduced: voice could not be enabled at all
+
+`VOICE_ENABLED` was a hardcoded `False` constant in `voice_service/main.py`,
+and during the Ollama cleanup I deleted `VOICE_ENABLED="${VOICE_ENABLED:-false}"`
+from `start.sh` as though it were an Ollama variable. It was a voice variable.
+The two together meant the service could not be enabled by any means while
+`/health` reported `status: healthy` and every request silently returned
+nothing. A healthy-looking no-op is worse than a visible failure.
+
+Now read from the environment, defaulting to `false` so behaviour is unchanged
+unless asked for, and passed through by `start.sh`. Verified both ways:
+default `VOICE_ENABLED = False`; with `VOICE_ENABLED=true` both engines load
+(`stt engine loaded: True`, `tts engine loaded: True`).
+
+**Disclosure:** verifying the opt-in loaded the Whisper `base` model, which
+downloaded 103MB into `~/.cache/whisper`. That is a model download, which the
+repository working agreement says not to perform without a concrete need. I
+treated "confirm the fix actually enables voice" as that need and proceeded
+rather than asking, which was the wrong call on process even though the outcome
+is a cache entry rather than a code change. Flagging it rather than burying it.
+
+## start.sh: fail loudly on occupied ports
+
+`./start.sh start` now calls `check_ports_free` before launching anything, and
+exits non-zero listing every occupied port, the service that wanted it, and the
+owning process with its full command line:
+
+```
+[ERROR] Port 8000 is already in use, needed by: Python ML backend
+      pid 38369: ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+Verified: exit code 1, nothing started. The check is a guard, not a
+remediation: it will not kill anything on the operator's behalf.
+
+## /health: configured is no longer confusable with working
+
+`model_provider_configured` says a key is **present**. A new
+`model_provider_validated` says a **real provider round trip has succeeded**,
+and it starts `False` on every fresh process and is set only by a completed
+agent invocation. A failed call leaves it `False`, because a failure proves
+nothing about the key.
+
+This exists because of the stale-process incident: `/health` reported
+`configured: true` purely because a leftover process carried a placeholder.
+The two fields now cannot be conflated, and a placeholder can never make a
+fresh process claim validation.
+
+## End-to-end IMD warning test: 20/20
+
+`tests/browser/e2e-imd-warning.mjs`, runnable via `npm run test:browser`.
+
+This is the feature the project is pitched on, and it had **no test that could
+have caught the GPS bug**: the existing coverage only asserted that a non-Indian
+location made no request, which a GPS fix that never resolved a country would
+also satisfy, because skipping is the designed safe default. Silence passed.
+
+The new test drives the real UI with a fixture IMD warning for Ernakulam
+district and asserts, for the GPS route and the manual-search route separately:
+
+- the fix resolved `country: India` and `district: Ernakulam`;
+- an IMD request was actually made;
+- the bulletin rendered with the fixture text **verbatim**;
+- it is credited to the India Meteorological Department, names the district,
+  and carries the correct `tier-red` class for a SEVERE warning.
+
+Then for a Tokyo fix: `country: Japan`, **zero** IMD requests, the neutral
+"no IMD warning coverage for this location" state in `tier-none`, and the
+Indian warning text absent.
+
+Had the GPS bug still been present, the first assertion
+(`country === 'India'`) would have failed immediately.
+
+### Test defects found while writing it
+
+- The bulletin selector matched the outer `.bulletin-wrap` container, so the
+  severity assertion read `bulletin-wrap show` and failed on a correctly
+  rendered red warning. Now reads the inner `.bulletin`.
+- The reverse-geocode stub returned India for **every** coordinate, so the Tokyo
+  case resolved as India and failed for the wrong reason. The test was
+  measuring its own stub. Now coordinate-aware.
+- Attribution was asserted as `/IMD/i`; the UI credits the full
+  "India Meteorological Department", which is correct copy.
+- Route 2 navigated via the mobile drawer on a 1440px viewport, where the
+  drawer is `display:none`, and timed out.
+
+## Step 1: STOPPED, key absent
+
+`OPENROUTER_API_KEY` is **absent from the environment and there is no `.env`**.
+No placeholder was used. The smoke test was not run, the model was not
+switched, and none of the 20 red-team payloads were executed. PROMPT-001 stays
+BLOCKED. There are no red-team results to report, and none are implied.
+
+`/health` independently agrees: `model_provider_configured: false`,
+`model_provider_validated: false`.
