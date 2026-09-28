@@ -819,9 +819,13 @@ def weather_agent(request: AgentRequest):
     if not agent_configured():
         raise HTTPException(
             status_code=503,
+            # Shown to the user now, so it must not name environment variables
+            # or internal services. The key state belongs in the startup log
+            # and /health, where an operator will look for it.
             detail=(
-                "The weather agent is not configured: OPENROUTER_API_KEY is "
-                "not set on the ML service."
+                "The weather assistant is not set up on this server, so it "
+                "cannot answer questions. Weather, forecasts and warnings "
+                "still work."
             ),
         )
 
@@ -922,7 +926,10 @@ def weather_agent(request: AgentRequest):
             )
         raise HTTPException(
             status_code=502,
-            detail=f"The weather model could not be reached ({type(last_error).__name__}).",
+            # The exception class name is an implementation detail. The operator
+        # gets it from the logger.exception() call immediately above; the user
+        # gets the fact and a next step.
+        detail="The weather model could not be reached. Please try again in a moment.",
         )
 
     cache_put(request.prompt, answer)

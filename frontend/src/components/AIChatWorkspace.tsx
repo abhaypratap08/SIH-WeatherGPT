@@ -94,10 +94,25 @@ export default function AIChatWorkspace({ lang = 'en' }: { lang?: 'en' | 'hi' })
           )
           .catch(() => '');
 
+        // The backend already writes its error copy FOR THE USER. Its 503
+        // carries the real cause and when it changes ("daily limit, resets at
+        // 29 Sep 2026, 05:30 IST"), which is the only actionable fact in the
+        // whole response.
+        //
+        // This code used to read `detail`, log it, and then throw it away in
+        // favour of a hardcoded string per status. On a phone that meant the
+        // user was told "it has not been configured on this server" while the
+        // real cause was a spent daily allowance, and the reset time was
+        // discarded — sending them away to wait for a server repair that was
+        // not needed and would not help. A false cause is worse than no cause.
+        //
+        // So the detail is used when present, and the per-status string is only
+        // a fallback for a response that carries no usable detail. The
+        // operator log is kept.
         let content: string;
-        if (response.status === 503) {
-          content =
-            'The weather assistant is not available right now — it has not been configured on this server. Please try again later.';
+        const sayable = detail.trim();
+        if (sayable) {
+          content = sayable;
         } else if (response.status === 502) {
           content =
             'The weather assistant could not reach its language model. Please try again in a moment.';

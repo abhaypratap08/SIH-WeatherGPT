@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from unittest import mock
 
@@ -281,6 +282,167 @@ check("D10: the ERROR tells the operator what to do",
       loud and "Restart the service" in loud[0])
 check("D11: the ERROR does not contain the key", FAKE_KEY not in "\n".join(
       r.getMessage() for r in log_records))
+
+def _reload_main():
+    """Re-import the module so a mutated source is actually re-executed."""
+    import importlib
+    import sys
+    sys.modules.pop("main", None)
+    return importlib.import_module("main")
+
+
+def _post_agent(prompt, agent_exc=None, key="test-key"):
+    """
+    Drive the REAL /agent handler and return (status, detail).
+
+    Each failure mode is produced by making the agent raise the exception the
+    provider would really raise, so the assertions run against the code that
+    ships rather than a string constant that happens to look right. A mutation
+    to main.py's message changes the result.
+    """
+    from fastapi.testclient import TestClient
+
+    m = _reload_main()
+
+    class Boom:
+        def invoke(self, payload):
+            raise agent_exc
+
+    saved_key = os.environ.get("OPENROUTER_API_KEY")
+    saved_agent = m._agent_instance
+    saved_warn = m.warning_response
+    try:
+        if key is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = key
+        m._agent_instance = Boom() if agent_exc is not None else None
+        # Bypass the deterministic warning fast path and the answer cache so the
+        # provider branch is the one under test.
+        m.warning_response = lambda *a, **k: None
+        client = TestClient(m.app, raise_server_exceptions=False)
+        r = client.post("/agent", json={"prompt": prompt})
+        try:
+            detail = r.json().get("detail", "")
+        except Exception:
+            detail = r.text[:200]
+        return r.status_code, detail
+    finally:
+        m.warning_response = saved_warn
+        m._agent_instance = saved_agent
+        if saved_key is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = saved_key
+
+
+def _daily_cap_exception():
+    """
+    The exception OpenRouter raises when the free-model daily allowance is spent.
+
+    Built by concatenation rather than a nested-escaped literal: the real error
+    text is itself a JSON document embedded in a Python dict rendered as a
+    string, and hand-escaping that reliably produces a syntax error instead of
+    the fixture. `_daily_cap_info` keys on the two substrings below, and the
+    reset time is read from the headers, exactly as it is in production.
+    """
+    raw = (
+        '{"error":{"code":429,"message":"Rate limit exceeded",'
+        '"metadata":{"limit_source":"free-models-per-day"}}}'
+    )
+    text = "Error code: 429 - {'error': {'code': '429', " + repr(raw) + "}"
+    e = Exception(text)
+    resp = type("R", (), {})()
+    resp.headers = {"X-RateLimit-Reset": "1790640000000", "X-RateLimit-Limit": "50",
+                    "X-RateLimit-Remaining": "0"}
+    e.response = resp
+    return e
+
+
+# ---------------------------------------------------------------- part E
+print("\n### E · the error the user actually sees (M-01)")
+# The frontend used to read `detail`, log it, and substitute a hardcoded string
+# per status, so a spent daily allowance reached the phone as "this server has
+# not been configured". Both halves are asserted, and the backend half drives
+# the real /agent handler with the exceptions the provider actually raises.
+
+PROMPT = "is it safe to travel to Pari Chowk without an umbrella today?"
+
+# --- no key on the service
+st, d = _post_agent(PROMPT, key=None)
+print(f"  no key       {st}: {d[:120]}")
+check("E1: a keyless service answers 503", st == 503, str(st))
+check("E2: the not-configured detail names no environment variable",
+      "OPENROUTER" not in d and "API_KEY" not in d, d[:80])
+check("E3: the not-configured detail names no internal service",
+      "ML service" not in d, d[:80])
+check("E4: the not-configured detail says what still works",
+      "still work" in d.lower(), d[:100])
+
+# --- the daily allowance is spent
+st, d = _post_agent(PROMPT, agent_exc=_daily_cap_exception())
+print(f"  daily cap    {st}: {d[:120]}")
+check("E5: a spent allowance answers 503", st == 503, str(st))
+check("E6: the daily-cap detail says the limit is a daily one",
+      "daily limit" in d.lower(), d[:100])
+check("E7: the daily-cap detail states WHEN it resets", "reset" in d.lower(), d[:100])
+check("E8: the daily-cap detail includes the actual reset time",
+      "05:30" in d, d[:110])
+check("E9: the daily-cap detail says what still works",
+      "still work" in d.lower())
+check("E10: the daily-cap detail leaks no env var or service name",
+      "OPENROUTER" not in d and "ML service" not in d)
+
+# --- the model is unreachable
+st, d = _post_agent(PROMPT, agent_exc=ValueError("some upstream failure"))
+print(f"  unreachable  {st}: {d[:120]}")
+check("E11: an unreachable model answers 502", st == 502, str(st))
+check("E12: the 502 detail names no exception class",
+      not any(x in d for x in ("Error", "Exception", "ValueError", "Timeout")), d[:90])
+check("E13: the 502 detail still says what to do next",
+      "try again" in d.lower(), d[:90])
+
+# --- the live service, if it is up
+try:
+    req = urllib.request.Request(
+        "http://127.0.0.1:8000/agent",
+        data=json.dumps({"prompt": PROMPT}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            _ls, _ld = r.status, json.loads(r.read().decode()).get("detail", "")
+    except urllib.error.HTTPError as e:
+        _ls, _ld = e.code, json.loads(e.read().decode()).get("detail", "")
+    print(f"  live         {_ls}: {_ld[:120]}")
+    check("E14: the live service returns a usable detail", bool(_ld.strip()))
+    check("E15: the live detail leaks no env var or service name",
+          "OPENROUTER" not in _ld and "ML service" not in _ld, _ld[:90])
+except Exception as e:
+    print(f"  (live service unreachable: {type(e).__name__})")
+    check("E14: the live service returns a usable detail", False, type(e).__name__)
+
+# --- the frontend half, from source
+_frontend = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                              "frontend", "src", "components",
+                              "AIChatWorkspace.tsx"), encoding="utf-8").read()
+check("E16: the frontend still reads `detail` from the error body", "detail" in _frontend)
+# The phrase survives in the comment explaining the fix, so look for it being
+# ASSIGNED to the string the user is shown, not merely present in the file.
+_bad = re.search(r"content\s*=\s*[^;]*has not been configured", _frontend, re.S)
+check("E17: the false 'not configured' copy is assigned to no user-facing string",
+      _bad is None, (_bad.group(0)[:70] + "...") if _bad else "only in an explanatory comment")
+# Assert the CONTROL FLOW, not the presence of an identifier. A mutation that
+# makes the `if` constant-false leaves the word "sayable" in the file, so a
+# substring check passed on a frontend that had been reverted to discarding the
+# detail entirely -- which is precisely the bug being guarded.
+_pref = re.search(
+    r"if\s*\(\s*sayable\s*\)\s*\{\s*\n\s*content\s*=\s*sayable\s*;", _frontend)
+check("E18: the frontend prefers a non-empty detail when one is present",
+      _pref is not None,
+      "found: content = sayable guarded by `if (sayable)`" if _pref
+      else "the guard `if (sayable) { content = sayable; }` is missing")
+check("E19: a per-status fallback still exists for a detail-less response",
+      "unavailable right now" in _frontend)
 
 print("\n" + "=" * 78)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
