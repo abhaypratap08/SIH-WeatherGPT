@@ -7,6 +7,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,9 +40,20 @@ class TTSResponse(BaseModel):
 # Configuration
 # =============================================================================
 
-# Set to True to enable server-side STT/TTS, False for no-op mode
-# In production, set VOICE_ENABLED=true and configure providers
-VOICE_ENABLED: bool = False
+# Set to True to enable server-side STT/TTS, False for no-op mode.
+#
+# Read from the environment so it can actually be turned on. This was a
+# hardcoded `False`, and start.sh's `VOICE_ENABLED="${VOICE_ENABLED:-false}"`
+# was removed during the Ollama cleanup as if it were an Ollama variable. It was
+# not: the net result was that voice could not be enabled by any means, and
+# /health reported healthy while every request silently returned nothing.
+#
+# Defaults to False, so behaviour is unchanged unless explicitly requested.
+# Enabling it loads the Whisper "base" model on first use, which downloads
+# roughly 140MB. start.sh passes the variable through.
+VOICE_ENABLED: bool = os.environ.get("VOICE_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # Default TTS format
 DEFAULT_TTS_FORMAT: str = "audio/wav"

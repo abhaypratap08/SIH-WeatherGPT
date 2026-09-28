@@ -66,6 +66,54 @@ port_in_use() {
     return 1
 }
 
+# Describe whatever is listening on a port, for an actionable error message.
+port_owner_desc() {
+    local pids pid
+    if command -v lsof >/dev/null 2>&1; then
+        pids="$(lsof -ti ":$1" -sTCP:LISTEN 2>/dev/null || true)"
+        if [ -n "$pids" ]; then
+            for pid in $pids; do
+                printf "pid %s: %s\n" "$pid" "$(ps -p "$pid" -o args= 2>/dev/null | cut -c1-160)"
+            done
+            return 0
+        fi
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp 2>/dev/null | grep ":$1 " | cut -c1-160 || true
+    fi
+}
+
+# Refuse to start when a port we need is already taken.
+#
+# This exists because a stale ML process once held :8000 with a placeholder
+# environment while start.sh reported "Port 8000 in use - assuming ML backend is
+# running" and carried on. The app then talked to a leftover process that was
+# not the one it launched, which is a far worse failure than a refusal: nothing
+# in the output says the service underneath is not the intended one.
+check_ports_free() {
+    local blocked=0 port name desc
+    for entry in "$BACKEND_PORT:Java backend" "$ML_PORT:Python ML backend" \
+                 "$FRONTEND_PORT:Frontend" "$VOICE_PORT:Voice service"; do
+        port="${entry%%:*}"; name="${entry#*:}"
+        if port_in_use "$port"; then
+            error "Port $port is already in use, needed by: $name"
+            port_owner_desc "$port" | while IFS= read -r line; do
+                printf "      %s\n" "$line"
+            done
+            blocked=1
+        fi
+    done
+    if [ "$blocked" -ne 0 ]; then
+        printf "\n"
+        error "Refusing to start: an existing process is serving one of the ports above."
+        error "It may be a stale run, and the app would silently talk to THAT process"
+        error "instead of a freshly started one. Stop it first, then retry:"
+        error "    ./start.sh stop"
+        error "    (or free the specific port, e.g. kill \$(lsof -ti :8000))"
+        exit 1
+    fi
+}
+
 stop_port() {
     if command -v lsof >/dev/null 2>&1; then
         PIDS="$(lsof -ti ":$1" 2>/dev/null || true)"
@@ -139,7 +187,13 @@ start_voice_service() {
     [ -f "$VOICE_DIR/main.py" ] || { warn "Voice service not found — skipping."; return; }
     if port_in_use "$VOICE_PORT"; then warn "Port $VOICE_PORT in use."; return; fi
     info "Starting voice service on :$VOICE_PORT..."
-    ( cd "$VOICE_DIR" && "$(python_cmd)" main.py ) & VOICE_PID=$!
+    # VOICE_ENABLED is the voice service's own switch, not an Ollama one: it was
+    # removed by mistake during the provider migration, which left the service
+    # permanently in no-op mode and /health reporting healthy while every
+    # request silently returned nothing. Defaults to false, so behaviour is
+    # unchanged unless explicitly requested. Export VOICE_ENABLED=true to
+    # enable it; the Whisper "base" model downloads on first use.
+    ( cd "$VOICE_DIR" && VOICE_ENABLED="${VOICE_ENABLED:-false}" "$(python_cmd)" main.py ) & VOICE_PID=$!
     COUNT=0
     while [ "$COUNT" -lt 30 ]; do
         port_in_use "$VOICE_PORT" && { success "Voice service → http://localhost:$VOICE_PORT"; return; }
@@ -197,19 +251,32 @@ setup_project() {
     # which is what happened once .venv existed and start.sh started preferring
     # it over the system interpreter.
     #
-    # openai-whisper pulls PyTorch, so this is a large download. It is
-    # installed here so setup produces a project that actually runs; the README
-    # documents how to skip it and install it by hand instead.
+    # torch is installed FIRST, from the CPU-only wheel index, with
+    # --no-cache-dir. This project transcribes CPU audio and never uses CUDA,
+    # and the default torch pulls multi-gigabyte CUDA wheels. Installing it
+    # first, and without a download cache, is what keeps the install inside the
+    # filesystem quota: a plain `pip install -r voice_service/requirements.txt`
+    # failed with OSError errno 122 (disk quota exceeded) while `df` reported
+    # 400GB+ free, because the cached CUDA wheels plus their extraction crossed
+    # the quota together. See README section 3a.
     if [ -f "$VOICE_DIR/requirements.txt" ]; then
-        info "Installing voice service dependencies ($PIP)..."
-        info "  note: openai-whisper pulls PyTorch, so this is a large download."
-        if "$PIP" install -r "$VOICE_DIR/requirements.txt" -q; then
-            success "Voice deps installed."
-        else
+        info "Installing CPU-only PyTorch for the voice service..."
+        if ! "$PIP" install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch; then
             VOICE_OK=0
-            warn "Voice dependency install FAILED — the voice service will NOT work."
-            warn "  Retry:  $PIP install -r voice_service/requirements.txt"
-            warn "  README: 'Voice service' documents a manual, opt-in install."
+            warn "CPU-only PyTorch install FAILED — the voice service will NOT work."
+            warn "  Retry:  $PIP install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch"
+            warn "  Transcription also needs a system ffmpeg; see README section 3a."
+        else
+            success "CPU-only PyTorch installed."
+            info "Installing the remaining voice dependencies ($PIP)..."
+            if "$PIP" install --no-cache-dir -r "$VOICE_DIR/requirements.txt" -q; then
+                success "Voice deps installed."
+            else
+                VOICE_OK=0
+                warn "Voice dependency install FAILED — the voice service will NOT work."
+                warn "  Retry:  $PIP install --no-cache-dir -r voice_service/requirements.txt"
+                warn "  README: 'Voice service' documents a manual, opt-in install."
+            fi
         fi
     fi
 
@@ -260,6 +327,9 @@ case "$COMMAND" in
         printf "\n============================================================\n"
         printf "                 WEATHERGPT STARTUP\n"
         printf "============================================================\n\n"
+        # Refuse up front rather than starting what it can and warning about the
+        # rest: a partially started stack is harder to reason about than none.
+        check_ports_free
         start_backend; start_ml; start_voice_service; start_frontend
         print_summary
         while true; do

@@ -95,6 +95,12 @@ def agent_configured() -> bool:
     return bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
+# Set only by a real, successful provider round trip (see weather_agent).
+# It is process-local and starts False, so a freshly started service never
+# claims validation it has not performed.
+_PROVIDER_VALIDATED = {"ok": False}
+
+
 @app.get("/health")
 def health():
     """
@@ -115,7 +121,17 @@ def health():
         "service": "weathergpt-ml",
         "version": "1.0.1",
         "model_provider": "openrouter",
+        # Present/absent only, never the value and never its length: a key is a
+        # credential and a health endpoint is the wrong place to describe one.
         "model_provider_configured": agent_configured(),
+        # "configured" must never be mistaken for "working". A key can be
+        # present and still be a placeholder from a stale process, which is
+        # exactly what happened once: /health said configured: true because a
+        # leftover process carried a throwaway value, while no real key existed
+        # anywhere. So validation is tracked SEPARATELY and is only ever set by
+        # an actual provider call. Until one succeeds this stays false, which
+        # makes the two states impossible to confuse.
+        "model_provider_validated": bool(_PROVIDER_VALIDATED["ok"]),
     }
 
 
@@ -554,12 +570,16 @@ def weather_agent(request: AgentRequest):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         # Provider or transport failure. The detail is logged server-side; the
-        # client gets a stable, non-leaking message.
+        # client gets a stable, non-leaking message. Validation stays False:
+        # a failure proves nothing about the key.
         logger.exception("agent invocation failed")
         raise HTTPException(
             status_code=502,
             detail=f"The weather model could not be reached ({type(e).__name__}).",
         )
+
+    # A completed round trip is the only thing that marks the key validated.
+    _PROVIDER_VALIDATED["ok"] = True
 
     response = result["messages"][-1].content
 
