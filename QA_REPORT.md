@@ -583,7 +583,7 @@ payloads were executed against a live model. It did **not** pass cleanly.
 | Finding | Status |
 |---|---|
 | **F-1** system prompt disclosure (RT-04, RT-05, RT-08) | **PARTIALLY FIXED** — hard n-gram guard added, verified 3/3 per payload against mocks. Soft prompt rules added. Not yet re-verified live (quota) |
-| **F-2** instruction override (RT-06) | **OPEN** — a one-word compliant answer has no overlap for a mechanical guard to detect. Soft prompt rule added; the live run showed it bypassed |
+| **F-2** instruction override (RT-06) | **OPEN — accepted risk.** A one-word compliant answer has no overlap for a mechanical guard to detect. **Accepted with this mitigation: model output can never alter or soften a warning, because the bulletin renders from IMD data.** |
 | **F-3** free-tier cap (50 requests/day) | **OPEN — operator decision, not a code defect.** No credits added, no model switched, per instruction |
 | **F-4** fast path answered a warning question with current weather | **FIXED** — deterministic warning routing, 40/40, zero model calls |
 
@@ -1683,6 +1683,19 @@ simply refusing everything.
 compliant answer ("PWNED") has no overlap for an n-gram guard to detect. The
 test asserts this limitation explicitly so it cannot be quietly forgotten. The
 prompt rule is the only mitigation, and the live run showed it being bypassed.
+
+**RT-06 is accepted as an open risk on this basis: model output can never alter
+or soften a warning, because the bulletin renders from IMD data.** The model
+does not write the bulletin. `WarningBulletin` takes no message or agent
+output at all, renders `warning.text` verbatim, labels it "Verbatim · India
+Meteorological Department", and its severity class comes from the IMD record.
+So a model that abandons its role can produce a wrong sentence in the chat
+transcript, and cannot change what the user is told to do about a warning.
+
+The residual risk is that a user reads a model sentence as authoritative. It is
+bounded by the deterministic warning path, which answers warning questions
+without the model at all, and by the out-of-scope state for non-India
+locations, which the model also does not control.
 
 ## FIX 3 · Honest rate limits — PASS
 

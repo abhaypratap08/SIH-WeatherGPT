@@ -691,6 +691,13 @@ Location information can be represented using latitude/longitude and spatial dat
 
 # 🔐 Security & Reliability
 
+**Model output can never alter or soften a weather warning.** The warning
+bulletin renders from IMD data, not from the assistant: it displays the
+official text verbatim, is labelled as verbatim, and takes no model output at
+all. A warning question is also answered by a deterministic lookup that never
+calls the model. The model can put a wrong sentence in the chat, and cannot
+change what you are told to do about a warning.
+
 Weather information can influence important decisions, so the platform should prioritize reliability.
 
 Recommended practices:
