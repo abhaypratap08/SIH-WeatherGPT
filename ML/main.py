@@ -5,7 +5,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from agent import build_agent, geocode_place, get_weather
+from agent import LEAK_REFUSAL, build_agent, geocode_place, get_weather, looks_like_prompt_leak
 from imd_warnings import warning_response
 from route_weather.analyzer import analyze_route
 from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
@@ -123,6 +123,48 @@ def _is_transient_provider_error(e: Exception) -> bool:
     if any(t in type(e).__name__ for t in _TRANSIENT_EXC_NAMES):
         return True
     return any(t in str(e).lower() for t in _TRANSIENT_MSG_HINTS)
+
+
+def _daily_cap_info(e: Exception) -> Optional[datetime]:
+    """
+    If this 429 is the DAILY free-model cap, return the reset time.
+
+    The daily cap must be handled differently from a short-window rate limit:
+    retrying 3+6+9 seconds cannot help, and telling the user to "try again in a
+    few moments" is actively misleading when the next opportunity is tomorrow.
+
+    The reset time is read from the rate-limit headers when the SDK exposes
+    them, and otherwise from the error body, whose `metadata.headers` carries
+    `X-RateLimit-Reset` as epoch milliseconds.
+    """
+    text = str(e)
+    is_daily = "free-models-per-day" in text or "free_tier_daily" in text
+    if not is_daily:
+        return None
+
+    reset_ms = None
+    # Prefer structured headers off the exception response, if present.
+    response = getattr(e, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            raw = headers.get("X-RateLimit-Reset")
+            if raw:
+                reset_ms = int(raw)
+        except (TypeError, ValueError):
+            reset_ms = None
+    if reset_ms is None:
+        m = re.search(r"X-RateLimit-Reset'?:\s*'?(\d{10,})", text)
+        if m:
+            reset_ms = int(m.group(1))
+    if reset_ms is None:
+        return None
+    # OpenRouter reports epoch milliseconds.
+    seconds = reset_ms / 1000 if reset_ms > 1e11 else reset_ms
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone(timedelta(hours=5, minutes=30)))
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 @app.get("/health")
@@ -607,6 +649,7 @@ def weather_agent(request: AgentRequest):
     # the provider is momentarily busy.
     answer = None
     last_error: Exception | None = None
+    daily_cap_reset: Optional[datetime] = None
     for attempt in range(_PROVIDER_ATTEMPTS):
         try:
             result = get_agent().invoke({"messages": messages})
@@ -614,11 +657,26 @@ def weather_agent(request: AgentRequest):
             # validated. A failure proves nothing about the key.
             _PROVIDER_VALIDATED["ok"] = True
             answer = result["messages"][-1].content
+            # Hard control: the model reproduced the system prompt verbatim
+            # under direct extraction, and again inside a refusal, so every
+            # answer is checked before it leaves the service. See
+            # agent.looks_like_prompt_leak.
+            if looks_like_prompt_leak(answer):
+                logger.warning("output guard: answer matched the system prompt, refusing")
+                answer = LEAK_REFUSAL
             break
         except RuntimeError:
             # Missing key / misconfiguration: not transient, never retried.
             raise
-        except Exception as e:  # noqa: BLE001 - filtered by _is_transient_provider_error
+        except Exception as e:  # noqa: BLE001 - filtered below
+            # A daily-cap 429 is NOT retried. Waiting cannot help, and the
+            # short-window backoff would turn a clear "tomorrow" into an
+            # 18-second wait followed by the same failure.
+            reset_at = _daily_cap_info(e)
+            if reset_at is not None:
+                daily_cap_reset = reset_at
+                last_error = e
+                break
             if not _is_transient_provider_error(e) or attempt == _PROVIDER_ATTEMPTS - 1:
                 last_error = e
                 break
@@ -633,6 +691,18 @@ def weather_agent(request: AgentRequest):
         # The detail is logged server-side; the client gets a stable,
         # non-leaking message naming the actual cause class.
         logger.exception("agent invocation failed")
+        if daily_cap_reset is not None:
+            # Say what is actually true, and when it changes. "Try again in a
+            # few moments" would be wrong here and would send the user away
+            # for a wait that cannot succeed.
+            when = daily_cap_reset.strftime("%d %b %Y, %H:%M IST")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The AI assistant has reached its daily limit and resets at "
+                    f"{when}. Weather, forecasts and warnings still work."
+                ),
+            )
         if last_error is not None and _is_transient_provider_error(last_error):
             raise HTTPException(
                 status_code=503,
