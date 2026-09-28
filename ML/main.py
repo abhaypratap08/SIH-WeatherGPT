@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent import build_agent, geocode_place, get_weather
+from imd_warnings import warning_response
 from route_weather.analyzer import analyze_route
 from route_weather.exceptions import GeocodingServiceError, LocationNotFoundError
 from route_weather.geocoding import get_coordinates
@@ -557,6 +558,19 @@ def weather_agent(request: AgentRequest):
     without guessing. Prompt-security results from the fast path are NOT
     evidence about the model.
     """
+    # A warning question is answered DETERMINISTICALLY, before anything else and
+    # with no model involved. A warning is a fact with a source: a model can
+    # invent one, soften one, or refuse to answer, and none of those are
+    # acceptable for the one output where being wrong could matter. This runs
+    # BEFORE the conditions fast path, which used to answer "is there an IMD
+    # alert for Thrissur?" with the caller's current temperature.
+    warning_answer = warning_response(request.prompt, request.location)
+    if warning_answer is not None:
+        return JSONResponse(
+            content={"message": warning_answer},
+            headers={"X-Response-Path": "warnings_deterministic"},
+        )
+
     fast_response = fast_weather_response(request.prompt, request.location)
     if fast_response is not None:
         return JSONResponse(
