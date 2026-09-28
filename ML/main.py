@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import urllib.parse
@@ -8,6 +9,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent import build_agent, geocode_place, get_weather
@@ -36,22 +38,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger = logging.getLogger("weathergpt.ml")
 
 # =========================================================
-# INITIALIZATION (OLLAMA / LANGCHAIN AGENT)
+# ENVIRONMENT
+# =========================================================
+# The operator keeps OPENROUTER_API_KEY in a .env file at the project root.
+# Without this the key was only ever read from the process environment, so a
+# perfectly good .env was ignored and the service answered 503 "not
+# configured", which is indistinguishable from a wrong key. Values are never
+# logged: only the fact that a file was found is reported, at DEBUG level.
+#
+# Real environment variables win over .env (override=False), so a value can be
+# overridden without editing the file.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _candidate in (
+    os.path.join(_PROJECT_ROOT, ".env"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+):
+    if os.path.isfile(_candidate):
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(_candidate, override=False)
+            logger.debug("Loaded environment file: %s", _candidate)
+        except ImportError:  # pragma: no cover - dependency guard
+            logger.warning(
+                "Found %s but python-dotenv is not installed; export "
+                "OPENROUTER_API_KEY in the shell instead.",
+                _candidate,
+            )
+        break
+
+
+# =========================================================
+# INITIALIZATION (OPENROUTER / LANGCHAIN AGENT)
 # =========================================================
 
-# Model is configurable via OLLAMA_MODEL env var (default: llama3.2).
-# Lazy-initialise so the server starts even if Ollama isn't running yet —
-# it will fail gracefully at request time, not at startup.
+# The model provider is OpenRouter (see agent.py). The agent is built lazily so
+# the service starts, and /health reports liveness, even when
+# OPENROUTER_API_KEY is absent — a missing key then surfaces as a clear 503 at
+# request time rather than preventing the process from booting.
 _agent_instance = None
 
 
 def get_agent():
     global _agent_instance
     if _agent_instance is None:
-        _agent_instance = build_agent()  # reads OLLAMA_MODEL / OLLAMA_BASE_URL env vars
+        # Reads OPENROUTER_API_KEY / LLM_MODEL from the environment.
+        _agent_instance = build_agent()
     return _agent_instance
+
+
+def agent_configured() -> bool:
+    """Whether a model provider key is present. Never returns the key itself."""
+    return bool(os.environ.get("OPENROUTER_API_KEY"))
+
+
+@app.get("/health")
+def health():
+    """
+    Liveness for this service.
+
+    Deliberately cheap and deliberately honest:
+      - reports that the FastAPI process is serving;
+      - reports whether a model provider is CONFIGURED (a boolean, never the
+        key, and never a network call);
+      - makes no LLM completion, because /health is polled by start-up scripts
+        and an expensive call would make start-up slow and flaky.
+
+    It does not probe any model endpoint. The previous implementation reported
+    on a local Ollama server, which no longer exists in this architecture.
+    """
+    return {
+        "status": "ok",
+        "service": "weathergpt-ml",
+        "version": "1.0.1",
+        "model_provider": "openrouter",
+        "model_provider_configured": agent_configured(),
+    }
 
 
 # =========================================================
@@ -81,11 +146,8 @@ class RouteWeatherRequest(BaseModel):
 
 class RouteWeatherResponse(BaseModel):
     message: str
-    route_info: dict[str, Any]
-    risk_summary: dict[str, int]
-    weather_data: list[dict[str, Any]]
-    map_json: dict[str, Any]
-    index_html: str
+    routes: list[dict[str, Any]]  # Each route: route_info, risk_summary, weather_data, map_json
+    index_html: str  # HTML for the primary (first) route
 
 
 # =========================================================
@@ -257,6 +319,67 @@ def root():
 
 
 
+# Filler words that can sit between a place name and a time expression. The
+# original capture regex kept them, so "in Greater Noida right now" resolved the
+# place as "Greater Noida right" and the geocoder correctly reported no such
+# place — a real locality became unresolvable because of grammar, not data.
+_PLACE_NOISE = {
+    "right", "just", "now", "at", "the", "moment", "currently", "today",
+    "tomorrow", "please", "and", "also", "a", "an", "is", "it", "for",
+    "here", "there", "over", "around", "nearby", "near",
+}
+
+# Time expressions the capture must stop before. A comma is a terminator ONLY
+# when it ends the clause: "in Kochi, Japan" must keep ", Japan", while
+# "in Kochi, and should I wear boots" must stop at the comma. A capitalised word
+# after the comma marks a region qualifier, which is how place names are
+# written; a lowercase word is ordinary clause punctuation.
+#
+# The capital-letter test is wrapped in a case-sensitive group on purpose:
+# these patterns compile with re.IGNORECASE, and under IGNORECASE a bare [A-Z]
+# also matches lowercase — which would make the negative lookahead fail at
+# every comma and swallow the rest of the sentence.
+_PLACE_STOP = (
+    r"(?=\s+(?:today|tomorrow|now|currently|this\s+week|tonight)\b"
+    r"|[?.!;]"
+    r"|,(?!\s*(?-i:[A-Z]))"
+    r"|$)"
+)
+
+
+def extract_place(prompt: str) -> Optional[str]:
+    """
+    Pull a place name out of a short weather question.
+
+    Returns None when the phrase is a pronoun or a description rather than a
+    name ("my location", "here"), so the caller can fall through to the model
+    instead of asking a geocoder to resolve a non-place.
+    """
+    match = re.search(
+        r"\b(?:in|at|for|near)\s+([A-Za-z][A-Za-z .',-]*?)" + _PLACE_STOP,
+        prompt,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    # Trim trailing filler: "Greater Noida right" -> "Greater Noida".
+    words = match.group(1).split()
+    while words and words[-1].lower().strip(".,'") in _PLACE_NOISE:
+        words.pop()
+    # Drop a dangling separator left behind once the filler is gone, so
+    # "Kochi, right" cannot reach the geocoder as "Kochi,".
+    place = " ".join(words).strip().strip(",").strip()
+    if not place:
+        return None
+
+    # Pronouns and bare descriptions are not places. Returning None sends the
+    # question to the model, which can ask for clarification.
+    if place.lower() in {"my location", "the location", "my area", "here", "there", "outside"}:
+        return None
+    return place
+
+
 def fast_weather_response(prompt: str, location: Optional[LocationPayload] = None) -> Optional[str]:
     text = prompt.lower().strip()
     weather_terms = (
@@ -274,26 +397,71 @@ def fast_weather_response(prompt: str, location: Optional[LocationPayload] = Non
         })
         location_name = "your location"
     else:
-        match = re.search(
-            r"\b(?:in|at|for|near)\s+([A-Za-z][A-Za-z .'-]*?)(?=\s+(?:today|tomorrow|now|currently|this week)\b|[?.!,]|$)",
-            prompt,
-            re.IGNORECASE,
-        )
-        if not match:
+        place = extract_place(prompt)
+        if not place:
             return None
-
-        place = match.group(1).strip()
         geo_raw = geocode_place.invoke({"place_name": place})
         geo = json.loads(geo_raw)
 
         if "error" in geo:
+            # A qualifier the geocoder could not honour is actionable — the
+            # user can fix it. Surface that specific reason instead of
+            # flattening it into "couldn't find", which sends them looking for
+            # a spelling mistake that isn't there. Transport failures keep the
+            # generic wording, because their message carries a requests
+            # exception string that must never reach a user.
+            if geo.get("reason") == "qualifier_mismatch":
+                return geo["error"]
             return f"Sorry, I couldn't find {place}."
+
+        # Name the place we ACTUALLY used. The geocoder's bare "name" is not
+        # enough: "Kochi" resolves to Kochi, Japan here, and answering
+        # "Kochi: 21.7°C" would present one country's weather as if it were
+        # unambiguously the place the user asked about. When the geocoder
+        # reports a collision, say so and ask which one is meant rather than
+        # picking silently.
+        if geo.get("ambiguous"):
+            # One line per candidate, and only the parts that actually
+            # disambiguate: repeating the name as its own region ("Kochi,
+            # Kochi, Japan") reads like a bug and helps nobody.
+            seen = set()
+            options = []
+            for c in geo.get("candidates", []):
+                cname = c.get("name")
+                country = c.get("country")
+                if not cname or not country:
+                    continue
+                # Keep the name, drop a region that merely repeats it
+                # ("Kochi, Kochi" -> "Kochi"), then the country.
+                parts = [cname]
+                region = c.get("admin1")
+                if region and region.strip().lower() != cname.strip().lower():
+                    parts.append(region)
+                parts.append(country)
+                label = ", ".join(parts)
+                if label.lower() in seen:
+                    continue
+                seen.add(label.lower())
+                options.append(label)
+            joined = "; ".join(options[:3])
+            return (
+                f"\"{place}\" matches more than one place ({joined}). "
+                "Which one did you mean?"
+            )
+
+        # Name the place actually used, without repeating a name as its own
+        # region: "Kochi, Japan", not "Kochi, Kochi, Japan".
+        name = geo.get("name") or place
+        parts = [
+            p for p in (name, geo.get("admin1"), geo.get("country"))
+            if p and p.strip().lower() != name.strip().lower()
+        ]
+        location_name = ", ".join([name, *parts])
 
         weather_raw = get_weather.invoke({
             "latitude": geo["latitude"],
             "longitude": geo["longitude"],
         })
-        location_name = geo.get("name") or place
 
     weather = json.loads(weather_raw)
 
@@ -332,9 +500,39 @@ def fast_weather_response(prompt: str, location: Optional[LocationPayload] = Non
 
 @app.post("/agent", response_model=AgentResponse)
 def weather_agent(request: AgentRequest):
+    """
+    Answer a weather question.
+
+    Two distinct paths, and the difference matters for testing:
+
+      FAST_PATH  `fast_weather_response` recognises simple, unambiguous
+                 questions and answers them from Open-Meteo directly WITHOUT
+                 calling a model. This is product functionality (fast, free,
+                 deterministic for the common cases) and it is kept.
+
+      LLM_BACKED anything else is sent to the OpenRouter-hosted model with the
+                 weather tools available.
+
+    Responses declare which path served them in the `X-Response-Path` header, so
+    a test (or an operator) can tell a regex answer from real model inference
+    without guessing. Prompt-security results from the fast path are NOT
+    evidence about the model.
+    """
     fast_response = fast_weather_response(request.prompt, request.location)
     if fast_response is not None:
-        return {"message": fast_response}
+        return JSONResponse(
+            content={"message": fast_response},
+            headers={"X-Response-Path": "fast_path"},
+        )
+
+    if not agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The weather agent is not configured: OPENROUTER_API_KEY is "
+                "not set on the ML service."
+            ),
+        )
 
     messages: list[dict[str, str]] = []
 
@@ -349,13 +547,26 @@ def weather_agent(request: AgentRequest):
         }
     )
 
-    result = get_agent().invoke({"messages": messages})
+    try:
+        result = get_agent().invoke({"messages": messages})
+    except RuntimeError as e:
+        # Missing key / misconfiguration: a 503, not an opaque 500.
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        # Provider or transport failure. The detail is logged server-side; the
+        # client gets a stable, non-leaking message.
+        logger.exception("agent invocation failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"The weather model could not be reached ({type(e).__name__}).",
+        )
 
     response = result["messages"][-1].content
 
-    return {
-        "message": response
-    }
+    return JSONResponse(
+        content={"message": response},
+        headers={"X-Response-Path": "llm_backed"},
+    )
 
 
 @app.post("/route-weather", response_model=RouteWeatherResponse)
@@ -394,78 +605,98 @@ def route_weather(request: RouteWeatherRequest):
         "%Y-%m-%d %H:%M",
     )
 
-    # 3. Fetch & sample route
-    route = get_route(origin, destination)
-    route_points = sample_route(
-        route["coordinates"],
-        interval_km=30,
-    )
+    # 3. Fetch routes (with alternatives)
+    routes = get_route(origin, destination, alternatives=True)
 
-    # 4. Add estimated arrival times along route
-    route_points = add_arrival_times(
-        route_points,
-        route["distance_km"],
-        route["duration_minutes"],
-        departure_time,
-    )
+    all_routes_data = []
+    primary_map_data = None
 
-    # 5. Fetch and analyze weather
-    weather_data = get_weather_for_route(route_points)
-    analyzed_data = analyze_route(weather_data)
+    for idx, route in enumerate(routes):
+        # Sample route points
+        route_points = sample_route(
+            route["coordinates"],
+            interval_km=30,
+        )
 
-    # 6. Risk summary aggregation
-    high = sum(1 for item in analyzed_data if item["risk"] == "HIGH")
-    moderate = sum(1 for item in analyzed_data if item["risk"] == "MODERATE")
-    low = sum(1 for item in analyzed_data if item["risk"] == "LOW")
+        # Add estimated arrival times along route
+        route_points = add_arrival_times(
+            route_points,
+            route["distance_km"],
+            route["duration_minutes"],
+            departure_time,
+        )
 
-    # 7. Construct map JSON matching CLI output formatting
-    map_data = {
-        "route": [
-            [coordinate[1], coordinate[0]]
-            for coordinate in route["coordinates"]
-        ],
-        "weather_points": [
-            {
-                **weather,
-                "lat": weather.get("lat") or weather.get("latitude") or (weather.get("coordinates", [None, None])[1] if isinstance(weather.get("coordinates"), (list, tuple)) else None),
-                "lon": weather.get("lon") or weather.get("lng") or weather.get("longitude") or (weather.get("coordinates", [None, None])[0] if isinstance(weather.get("coordinates"), (list, tuple)) else None),
-                "arrival_time": weather["arrival_time"].isoformat() if hasattr(weather.get("arrival_time"), "isoformat") else str(weather.get("arrival_time")),
-                "weather_time": weather["weather_time"].isoformat() if hasattr(weather.get("weather_time"), "isoformat") else str(weather.get("weather_time")),
-            }
-            for weather in analyzed_data
-        ],
-        "route_info": {
-            "origin": request.origin,
-            "destination": request.destination,
-            "distance_km": route["distance_km"],
-            "duration_minutes": route["duration_minutes"],
-            "departure_time": departure_time.isoformat(),
-        },
-    }
+        # Fetch and analyze weather
+        weather_data = get_weather_for_route(route_points)
+        analyzed_data = analyze_route(weather_data)
 
-    # 8. Save local artifacts (JSON & standalone HTML)
-    map_folder = os.path.join(os.path.dirname(__file__), "map")
-    os.makedirs(map_folder, exist_ok=True)
+        # Risk summary aggregation
+        high = sum(1 for item in analyzed_data if item["risk"] == "HIGH")
+        moderate = sum(1 for item in analyzed_data if item["risk"] == "MODERATE")
+        low = sum(1 for item in analyzed_data if item["risk"] == "LOW")
 
-    json_path = os.path.join(map_folder, "route_weather_data.json")
-    with open(json_path, "w", encoding="utf-8") as file:
-        json.dump(map_data, file, indent=2)
+        # Build route label
+        risk_parts = []
+        if high > 0: risk_parts.append(f"{high} high-risk")
+        if moderate > 0: risk_parts.append(f"{moderate} moderate-risk")
+        if low > 0: risk_parts.append(f"{low} low-risk")
+        risk_label = ", ".join(risk_parts) if risk_parts else "No risk"
+        
+        route_label = f"Route {chr(65 + idx)} · {route['distance_km']:.0f} km, {route['duration_minutes']:.0f} min · {risk_label}"
+        if idx == 0:
+            route_label = f"Route A (primary) · {route['distance_km']:.0f} km, {route['duration_minutes']:.0f} min · {risk_label}"
 
-    index_html = generate_index_html(map_data)
-    html_path = os.path.join(map_folder, "index.html")
-    with open(html_path, "w", encoding="utf-8") as file:
-        file.write(index_html)
+        # Construct map JSON
+        map_data = {
+            "route": [
+                [coordinate[1], coordinate[0]]
+                for coordinate in route["coordinates"]
+            ],
+            "weather_points": [
+                {
+                    **weather,
+                    "lat": weather.get("lat") or weather.get("latitude") or (weather.get("coordinates", [None, None])[1] if isinstance(weather.get("coordinates"), (list, tuple)) else None),
+                    "lon": weather.get("lon") or weather.get("lng") or weather.get("longitude") or (weather.get("coordinates", [None, None])[0] if isinstance(weather.get("coordinates"), (list, tuple)) else None),
+                    "arrival_time": weather["arrival_time"].isoformat() if hasattr(weather.get("arrival_time"), "isoformat") else str(weather.get("arrival_time")),
+                    "weather_time": weather["weather_time"].isoformat() if hasattr(weather.get("weather_time"), "isoformat") else str(weather.get("weather_time")),
+                }
+                for weather in analyzed_data
+            ],
+            "route_info": {
+                "origin": request.origin,
+                "destination": request.destination,
+                "distance_km": route["distance_km"],
+                "duration_minutes": route["duration_minutes"],
+                "departure_time": departure_time.isoformat(),
+                "route_index": idx,
+                "route_label": route_label,
+            },
+        }
 
-    # 9. Return Response
+        # Save primary route artifacts
+        if idx == 0:
+            primary_map_data = map_data
+            map_folder = os.path.join(os.path.dirname(__file__), "map")
+            os.makedirs(map_folder, exist_ok=True)
+
+            json_path = os.path.join(map_folder, "route_weather_data.json")
+            with open(json_path, "w", encoding="utf-8") as file:
+                json.dump(map_data, file, indent=2)
+
+            index_html = generate_index_html(map_data)
+            html_path = os.path.join(map_folder, "index.html")
+            with open(html_path, "w", encoding="utf-8") as file:
+                file.write(index_html)
+
+        all_routes_data.append({
+            "route_info": map_data["route_info"],
+            "risk_summary": {"HIGH": high, "MODERATE": moderate, "LOW": low},
+            "weather_data": analyzed_data,
+            "map_json": map_data,
+        })
+
     return {
-        "message": "WeatherGPT route analysis complete",
-        "route_info": map_data["route_info"],
-        "risk_summary": {
-            "HIGH": high,
-            "MODERATE": moderate,
-            "LOW": low,
-        },
-        "weather_data": analyzed_data,
-        "map_json": map_data,
-        "index_html": index_html,
+        "message": f"WeatherGPT route analysis complete — {len(all_routes_data)} route(s) analyzed",
+        "routes": all_routes_data,
+        "index_html": generate_index_html(primary_map_data) if primary_map_data else "",
     }

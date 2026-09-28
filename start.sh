@@ -18,15 +18,11 @@
 #   ./start.sh ml           Python ML backend only
 #   ./start.sh frontend     Frontend only
 #   ./start.sh voice        Voice service only
-#   ./start.sh setup        Install all dependencies + pull Ollama model
+#   ./start.sh setup        Install all dependencies
 #   ./start.sh test         Run backend tests
 #   ./start.sh build        Build all
 #   ./start.sh stop         Stop all services
 #   ./start.sh status       Show running services
-#
-# Environment overrides:
-#   OLLAMA_MODEL   Ollama model to use (default: llama3.2)
-#   VOICE_ENABLED  Enable voice service (default: false)
 # ============================================================
 
 set -eu
@@ -42,12 +38,8 @@ BACKEND_PORT=8080
 ML_PORT=8000
 FRONTEND_PORT=5173
 VOICE_PORT=8001
-OLLAMA_PORT=11434
 
-OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2}"
-VOICE_ENABLED="${VOICE_ENABLED:-false}"
-
-BACKEND_PID="" ML_PID="" FRONTEND_PID="" VOICE_PID="" OLLAMA_PID=""
+BACKEND_PID="" ML_PID="" FRONTEND_PID="" VOICE_PID=""
 
 # ------------------------------------------------------------
 # Colors
@@ -89,32 +81,19 @@ stop_port() {
 
 python_cmd()  { [ -f "$VENV_DIR/bin/python" ]  && echo "$VENV_DIR/bin/python"  || (command -v python3 >/dev/null 2>&1 && echo python3 || echo python); }
 uvicorn_cmd() { [ -f "$VENV_DIR/bin/uvicorn" ] && echo "$VENV_DIR/bin/uvicorn" || echo uvicorn; }
+pip_cmd()     { [ -f "$VENV_DIR/bin/pip" ]     && echo "$VENV_DIR/bin/pip"     || (command -v pip3 >/dev/null 2>&1 && echo pip3 || echo pip); }
 
 # ------------------------------------------------------------
 # Cleanup
 # ------------------------------------------------------------
 cleanup() {
     printf "\n"; info "Stopping WeatherGPT..."
-    for P in $BACKEND_PID $ML_PID $FRONTEND_PID $VOICE_PID $OLLAMA_PID; do
+    for P in $BACKEND_PID $ML_PID $FRONTEND_PID $VOICE_PID; do
         [ -n "$P" ] && kill "$P" 2>/dev/null || true
     done
     success "WeatherGPT stopped."; exit 0
 }
 trap cleanup INT TERM
-
-# ------------------------------------------------------------
-# Ollama
-# ------------------------------------------------------------
-pull_ollama_model() {
-    command -v ollama >/dev/null 2>&1 || { warn "Ollama not installed — skipping model pull."; return; }
-    info "Ensuring Ollama model '$OLLAMA_MODEL' is available..."
-    ollama list 2>/dev/null | grep -q "$OLLAMA_MODEL" && { success "Model '$OLLAMA_MODEL' already present."; return; }
-    if ! port_in_use "$OLLAMA_PORT"; then
-        info "Starting Ollama server..."; ollama serve >/tmp/weathergpt-ollama.log 2>&1 & OLLAMA_PID=$!
-        COUNT=0; while [ "$COUNT" -lt 20 ] && ! port_in_use "$OLLAMA_PORT"; do sleep 1; COUNT=$((COUNT+1)); done
-    fi
-    ollama pull "$OLLAMA_MODEL" && success "Model '$OLLAMA_MODEL' ready." || warn "Could not pull '$OLLAMA_MODEL'."
-}
 
 # ------------------------------------------------------------
 # Java backend
@@ -143,11 +122,11 @@ start_ml() {
     ! command -v "$UVCORN" >/dev/null 2>&1 && [ "$UVCORN" = "uvicorn" ] && { warn "uvicorn not found — skipping. Run: pip install -r ML/requirements.txt"; return; }
     if port_in_use "$ML_PORT"; then warn "Port $ML_PORT in use — assuming ML backend is running."; info "ML backend: http://localhost:$ML_PORT"; return; fi
     info "Starting Python ML backend on :$ML_PORT..."
-    ( cd "$ML_DIR" && OLLAMA_MODEL="$OLLAMA_MODEL" "$(uvicorn_cmd)" main:app --host 0.0.0.0 --port "$ML_PORT" --reload ) & ML_PID=$!
+    ( cd "$ML_DIR" && "$(uvicorn_cmd)" main:app --host 0.0.0.0 --port "$ML_PORT" --reload ) & ML_PID=$!
     COUNT=0
     while [ "$COUNT" -lt 30 ]; do
         port_in_use "$ML_PORT" && { success "ML backend → http://localhost:$ML_PORT"; return; }
-        kill -0 "$ML_PID" 2>/dev/null || { warn "ML backend exited — check Ollama is running."; return; }
+        kill -0 "$ML_PID" 2>/dev/null || { warn "ML backend exited — check your API configuration and logs."; return; }
         sleep 1; COUNT=$((COUNT+1))
     done
     warn "ML backend did not start in 30 seconds."
@@ -200,14 +179,48 @@ setup_project() {
     ( cd "$BACKEND_DIR" && mvn -q dependency:resolve ); success "Java deps resolved."
     info "Installing frontend dependencies (npm)..."
     ( cd "$FRONTEND_DIR" && npm install ); success "Frontend deps installed."
+
+    PIP="$(pip_cmd)"
+    VOICE_OK=1
+
     if [ -f "$ML_DIR/requirements.txt" ]; then
-        if [ -f "$VENV_DIR/bin/pip" ]; then PIP="$VENV_DIR/bin/pip"
-        elif command -v pip3 >/dev/null 2>&1; then PIP="pip3"
-        else PIP="pip"; fi
-        info "Installing Python ML dependencies ($PIP)..."; "$PIP" install -r "$ML_DIR/requirements.txt" -q; success "Python ML deps installed."
+        info "Installing Python ML dependencies ($PIP)..."
+        "$PIP" install -r "$ML_DIR/requirements.txt" -q
+        success "Python ML deps installed."
     fi
-    pull_ollama_model
-    printf "\n"; success "Setup complete. Run ./start.sh to launch."; printf "\n"
+
+    # The voice service runs from the SAME virtualenv as the ML service
+    # (python_cmd), so its requirements have to be installed into that same
+    # venv. Skipping them left ./start.sh setup reporting success while the
+    # voice service died at startup with
+    #   RuntimeError: Form data requires "python-multipart" to be installed
+    # which is what happened once .venv existed and start.sh started preferring
+    # it over the system interpreter.
+    #
+    # openai-whisper pulls PyTorch, so this is a large download. It is
+    # installed here so setup produces a project that actually runs; the README
+    # documents how to skip it and install it by hand instead.
+    if [ -f "$VOICE_DIR/requirements.txt" ]; then
+        info "Installing voice service dependencies ($PIP)..."
+        info "  note: openai-whisper pulls PyTorch, so this is a large download."
+        if "$PIP" install -r "$VOICE_DIR/requirements.txt" -q; then
+            success "Voice deps installed."
+        else
+            VOICE_OK=0
+            warn "Voice dependency install FAILED — the voice service will NOT work."
+            warn "  Retry:  $PIP install -r voice_service/requirements.txt"
+            warn "  README: 'Voice service' documents a manual, opt-in install."
+        fi
+    fi
+
+    printf "\n"
+    if [ "$VOICE_OK" -eq 1 ]; then
+        success "Setup complete. Run ./start.sh to launch."
+    else
+        warn "Setup finished with 1 problem: voice dependencies are missing."
+        warn "Everything else installed. The app runs; only voice is unavailable."
+    fi
+    printf "\n"
 }
 
 # ------------------------------------------------------------
@@ -235,7 +248,6 @@ print_summary() {
     printf "  %-32s %s\n" "Python ML backend (FastAPI):"  "http://localhost:$ML_PORT"
     printf "  %-32s %s\n" "Frontend (unified, all pages):" "http://localhost:$FRONTEND_PORT"
     port_in_use "$VOICE_PORT" && printf "  %-32s %s\n" "Voice service:" "http://localhost:$VOICE_PORT"
-    printf "\n  Ollama model: %s\n" "$OLLAMA_MODEL"
     printf "\n  Press Ctrl+C to stop all services.\n\n"
 }
 
@@ -248,7 +260,7 @@ case "$COMMAND" in
         printf "\n============================================================\n"
         printf "                 WEATHERGPT STARTUP\n"
         printf "============================================================\n\n"
-        pull_ollama_model; start_backend; start_ml; start_voice_service; start_frontend
+        start_backend; start_ml; start_voice_service; start_frontend
         print_summary
         while true; do
             sleep 30
@@ -256,9 +268,9 @@ case "$COMMAND" in
             [ -n "$FRONTEND_PID" ] && ! kill -0 "$FRONTEND_PID" 2>/dev/null && { error "Frontend stopped.";      cleanup; }
         done ;;
     backend)
-        pull_ollama_model; start_backend; [ -n "$BACKEND_PID" ] && wait "$BACKEND_PID" ;;
+        start_backend; [ -n "$BACKEND_PID" ] && wait "$BACKEND_PID" ;;
     ml)
-        pull_ollama_model; start_ml; [ -n "$ML_PID" ] && wait "$ML_PID" ;;
+        start_ml; [ -n "$ML_PID" ] && wait "$ML_PID" ;;
     frontend)
         start_frontend; [ -n "$FRONTEND_PID" ] && wait "$FRONTEND_PID" ;;
     voice)
@@ -271,7 +283,7 @@ case "$COMMAND" in
         printf "\n============================================================\n"
         printf "                 WEATHERGPT STATUS\n"
         printf "============================================================\n\n"
-        for ENTRY in "$BACKEND_PORT:Java backend" "$ML_PORT:Python ML backend" "$FRONTEND_PORT:Frontend" "$VOICE_PORT:Voice service" "$OLLAMA_PORT:Ollama"; do
+        for ENTRY in "$BACKEND_PORT:Java backend" "$ML_PORT:Python ML backend" "$FRONTEND_PORT:Frontend" "$VOICE_PORT:Voice service"; do
             PORT="${ENTRY%%:*}"; NAME="${ENTRY#*:}"
             if port_in_use "$PORT"; then printf "  %-32s running → http://localhost:%s\n" "$NAME" "$PORT"
             else printf "  %-32s not running\n" "$NAME"; fi
