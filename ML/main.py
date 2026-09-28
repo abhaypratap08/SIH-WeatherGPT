@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -99,6 +100,28 @@ def agent_configured() -> bool:
 # It is process-local and starts False, so a freshly started service never
 # claims validation it has not performed.
 _PROVIDER_VALIDATED = {"ok": False}
+
+# Free-tier provider resilience. Shared upstream pools return 429 (rate limited)
+# and 503 (overloaded) intermittently; both are retried with linear backoff
+# before the user is told anything.
+_PROVIDER_ATTEMPTS = 4
+_PROVIDER_BACKOFF_BASE = 3.0
+_TRANSIENT_EXC_NAMES = ("RateLimit", "Overloaded", "ServiceUnavailable", "APIConnection", "Timeout")
+_TRANSIENT_MSG_HINTS = ("429", "503", "rate limit", "rate-limit", "overloaded", "temporarily")
+
+
+def _is_transient_provider_error(e: Exception) -> bool:
+    """
+    Whether a provider failure is worth retrying.
+
+    The exception CLASS is not sufficient on its own: OpenRouter surfaces an
+    upstream 429/503 as a plain ValueError whose message is the error dict, so
+    the message is inspected too. Without that, a busy provider looked like a
+    hard failure and the user saw "the model could not be reached".
+    """
+    if any(t in type(e).__name__ for t in _TRANSIENT_EXC_NAMES):
+        return True
+    return any(t in str(e).lower() for t in _TRANSIENT_MSG_HINTS)
 
 
 @app.get("/health")
@@ -563,28 +586,55 @@ def weather_agent(request: AgentRequest):
         }
     )
 
-    try:
-        result = get_agent().invoke({"messages": messages})
-    except RuntimeError as e:
-        # Missing key / misconfiguration: a 503, not an opaque 500.
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        # Provider or transport failure. The detail is logged server-side; the
-        # client gets a stable, non-leaking message. Validation stays False:
-        # a failure proves nothing about the key.
+    # Free-tier models sit on shared upstream pools and fail transiently with
+    # 429 (rate limited) or 503 (provider overloaded) for reasons unrelated to
+    # this service. Those are retried with linear backoff, because reporting
+    # them as "the model is unavailable" would be untrue: nothing is broken,
+    # the provider is momentarily busy.
+    answer = None
+    last_error: Exception | None = None
+    for attempt in range(_PROVIDER_ATTEMPTS):
+        try:
+            result = get_agent().invoke({"messages": messages})
+            # A completed round trip is the only thing that marks the key
+            # validated. A failure proves nothing about the key.
+            _PROVIDER_VALIDATED["ok"] = True
+            answer = result["messages"][-1].content
+            break
+        except RuntimeError:
+            # Missing key / misconfiguration: not transient, never retried.
+            raise
+        except Exception as e:  # noqa: BLE001 - filtered by _is_transient_provider_error
+            if not _is_transient_provider_error(e) or attempt == _PROVIDER_ATTEMPTS - 1:
+                last_error = e
+                break
+            delay = _PROVIDER_BACKOFF_BASE * (attempt + 1)
+            logger.warning(
+                "transient provider failure (%s); retry %s/%s in %.1fs",
+                type(e).__name__, attempt + 1, _PROVIDER_ATTEMPTS - 1, delay,
+            )
+            time.sleep(delay)
+
+    if answer is None:
+        # The detail is logged server-side; the client gets a stable,
+        # non-leaking message naming the actual cause class.
         logger.exception("agent invocation failed")
+        if last_error is not None and _is_transient_provider_error(last_error):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The weather assistant is busy right now: the model "
+                    "provider is rate limiting requests. Please try again in a "
+                    "few moments."
+                ),
+            )
         raise HTTPException(
             status_code=502,
-            detail=f"The weather model could not be reached ({type(e).__name__}).",
+            detail=f"The weather model could not be reached ({type(last_error).__name__}).",
         )
 
-    # A completed round trip is the only thing that marks the key validated.
-    _PROVIDER_VALIDATED["ok"] = True
-
-    response = result["messages"][-1].content
-
     return JSONResponse(
-        content={"message": response},
+        content={"message": answer},
         headers={"X-Response-Path": "llm_backed"},
     )
 

@@ -1,18 +1,35 @@
-/**
- * REAL provider smoke test.
- *
- * Proves the full chain, bypassing the application's regex fast path:
- *   ChatOpenAI -> OpenRouter -> remote model -> tool call -> tool execution
- *   -> tool result returned to the model -> final answer.
- *
- * A 200 from the app is NOT accepted as evidence: this asserts an actual
- * tool_call is emitted AND that the tool's real output reaches the final
- * answer. The API key is read from the environment and never printed.
- */
+#!/usr/bin/env python3
+"""
+REAL provider smoke test.
+
+Proves the full chain, bypassing the application's regex fast path:
+  ChatOpenAI -> OpenRouter -> remote model -> tool call -> tool execution
+  -> tool result returned to the model -> final answer.
+
+A 200 from the app is NOT accepted as evidence: this asserts an actual
+tool_call is emitted AND that the tool's real output reaches the final
+answer. The API key is read from the environment and never printed.
+
+Run from the ML directory so the project-root .env is picked up:
+    ../.venv/bin/python smoke_test_llm.py
+"""
 import os
 import sys
 import time
 import json
+
+# Load the project-root .env exactly as the service does, so this test and the
+# running service can never disagree about which key is in play.
+_ENV_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+)
+if os.path.isfile(_ENV_FILE):
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_ENV_FILE, override=False)
+    except ImportError:
+        pass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,6 +68,44 @@ def line(label, ok, detail=""):
     return ok
 
 
+TRANSIENT = ("RateLimit", "Overloaded", "ServiceUnavailable", "APIConnection", "Timeout")
+
+# OpenRouter also surfaces an upstream 429/503 as a plain ValueError whose
+# message is the error dict, so the exception CLASS alone does not identify a
+# transient free-tier failure. The message is inspected as well.
+TRANSIENT_MSG = ("429", "503", "rate limit", "rate-limit", "overloaded", "temporarily")
+
+
+def _is_transient(e: Exception) -> bool:
+    if any(t in type(e).__name__ for t in TRANSIENT):
+        return True
+    return any(t in str(e).lower() for t in TRANSIENT_MSG)
+
+
+def with_retry(fn, attempts=5, base_delay=4.0):
+    """
+    Retry a call through free-tier transient failures.
+
+    Free OpenRouter models sit on shared upstream pools and fail transiently
+    with 429 (rate limited) or 503 (provider overloaded) for reasons that have
+    nothing to do with this client. Retrying with linear backoff is the
+    documented remedy; giving up on the first 429 would mean a smoke test that
+    reports a model defect when the provider was merely busy.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - broad on purpose, filtered by _is_transient
+            if not _is_transient(e):
+                raise
+            last = e
+            wait = base_delay * (i + 1)
+            print(f"       transient {type(e).__name__}; retry {i + 1}/{attempts - 1} in {wait:.0f}s")
+            time.sleep(wait)
+    raise last
+
+
 results = []
 llm = ChatOpenAI(
     model=os.environ.get("LLM_MODEL") or agent_mod.DEFAULT_MODEL,
@@ -65,7 +120,7 @@ llm = ChatOpenAI(
 print("── 1. plain model inference ──")
 t0 = time.time()
 try:
-    r = llm.invoke([HumanMessage(content="Reply with exactly the word: PONG")])
+    r = with_retry(lambda: llm.invoke([HumanMessage(content="Reply with exactly the word: PONG")]))
     txt = (r.content or "").strip()
     dt = time.time() - t0
     meta = r.response_metadata or {}
@@ -85,10 +140,10 @@ print("\n── 2. native tool calling (the app's core requirement) ──")
 t0 = time.time()
 try:
     bound = llm.bind_tools([probe_station_reading])
-    r = bound.invoke([
+    r = with_retry(lambda: bound.invoke([
         SystemMessage(content="You must call the probe tool to get readings. Never guess."),
         HumanMessage(content="What is the current reading at station KOC-1?"),
-    ])
+    ]))
     dt = time.time() - t0
     calls = getattr(r, "tool_calls", None) or []
     results.append(line("model emitted a real tool call", len(calls) > 0,
@@ -101,7 +156,16 @@ try:
         tool_out = probe_station_reading.invoke(c["args"])
         results.append(line("tool executed, real value returned", PROBE_VALUE in tool_out, tool_out[:70]))
         from langchain_core.messages import ToolMessage
-        r2 = bound.invoke(r.messages + [ToolMessage(content=tool_out, tool_call_id=c["id"])])
+        # `llm.invoke(messages)` returns a single AIMessage, not a message
+        # list, so the conversation is rebuilt explicitly. Using r.messages here
+        # was a bug in this script, not a model failure.
+        convo = [
+            SystemMessage(content="You must call the probe tool to get readings. Never guess."),
+            HumanMessage(content="What is the current reading at station KOC-1?"),
+            r,
+            ToolMessage(content=tool_out, tool_call_id=c["id"]),
+        ]
+        r2 = with_retry(lambda: bound.invoke(convo))
         final = (r2.content or "")
         results.append(line("tool result reached the model and is in the final answer",
                             PROBE_VALUE in final, f"final={final.strip()[:70]!r}"))
@@ -113,8 +177,8 @@ print("\n── 3. application agent (real tools: geocode_place + get_weather) �
 t0 = time.time()
 try:
     a = agent_mod.build_agent()
-    res = a.invoke({"messages": [HumanMessage(
-        content="Use your tools to look up Mumbai and tell me the current temperature in Celsius.")]})
+    res = with_retry(lambda: a.invoke({"messages": [HumanMessage(
+        content="Use your tools to look up Mumbai and tell me the current temperature in Celsius.")]}))
     dt = time.time() - t0
     msgs = res["messages"]
     tool_msgs = [m for m in msgs if getattr(m, "type", "") == "tool"]
@@ -127,7 +191,7 @@ try:
     answer = (msgs[-1].content or "")
     has_num = any(ch.isdigit() for ch in answer)
     results.append(line("final answer contains a real reading", has_num, answer.strip()[:90]))
-    results.append(line("agent did not dump raw JSON", not answer.strip().startswith("{\"coord")), "")
+    results.append(line("agent did not dump raw JSON", not answer.strip().startswith("{\"coord")))
 except Exception as e:
     results.append(line("agent invoked a real tool", False, f"{type(e).__name__}: {str(e)[:140]}"))
 

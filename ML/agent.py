@@ -39,10 +39,24 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 # OpenRouter's OpenAI-compatible surface.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Primary model. OpenRouter documents this free variant as supporting native
-# tool/function calling and structured outputs. `smoke_test_llm.py` asserts
-# tool calling actually works against it rather than trusting the model page.
-DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free"
+# Primary model, chosen by evidence rather than by the model page.
+#
+# It was originally `google/gemma-4-26b-a4b-it:free`. That model advertises
+# tools, but on this key it is unusable: every request returns HTTP 429 from the
+# upstream provider ("limit_source: upstream_provider_shared_pool", Google AI
+# Studio). `qwen/qwen3.8-27b:free` and `google/gemma-4-31b-it:free` behave the
+# same way. Those are shared free pools, so this is a capacity problem, not a
+# property of the model.
+#
+# `nvidia/nemotron-3-super-120b-a12b:free` passed `smoke_test_llm.py` 13/13 on
+# 2026-09-28: it emitted a real tool call, the tool executed, and the tool's
+# actual value reached the final answer. `liquid/lfm-2.5-2.6b:free` also emitted
+# tool calls and is a smaller fallback.
+#
+# Override with LLM_MODEL. Free models sit on shared pools and return 429/503
+# intermittently, which is why transient provider failures are retried rather
+# than surfaced to the user.
+DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 # WMO weather interpretation codes -> human readable description
 WEATHER_CODES = {
