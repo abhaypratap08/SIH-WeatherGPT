@@ -1,0 +1,1057 @@
+# QA Report — WeatherGPT (frontend + integrated services)
+
+**Date:** 2026-09-26 (remediation round 2)
+**QA STATUS: PASS WITH ISSUES** — 0 P0. Both P1 findings FIXED. Of the P2 findings: 7 FIXED, 1 NOT_A_DEFECT (retracted), 1 superseded by ML-1. Of the P3 findings: 3 FIXED, 2 OPEN (deferred by decision). PROMPT-001 remains **BLOCKED on a missing `OPENROUTER_API_KEY`**, not on a code defect. Every finding below carries exactly one current status; the round-by-round narrative is kept at the end as a remediation log and is not a second source of truth. No crashes, no data corruption, no XSS, no request storms. The honesty/fallback behaviour that is this product's differentiator works and is largely well built. The defects cluster in one theme: **degraded and narrow-viewport states are not held to the same standard as the happy path.**
+
+---
+
+## Environment
+
+| Item | Value |
+|---|---|
+| Frontend | `http://localhost:5173` (Vite 8.2.2 dev server, React 19.2.8, TS 6.0.2) |
+| App title | `WeatherGPT` |
+| Java backend | `https://sih-weathergpt-production.up.railway.app` (**PRODUCTION** — see Safety) |
+| ML backend | `http://localhost:8000` — **NOT RUNNING** (Python deps missing: `typing_extensions`; Ollama not running) |
+| Map tiles | OpenStreetMap · Radar: RainViewer |
+| Weather data | Open-Meteo (geocoding + grid) · Warnings: IMD via Java backend |
+| Browser | Chromium (Playwright 1.63), headless |
+| Viewports | 1440×900 (desktop), 768×1024 (tablet), 390×844 (iPhone 14), 375×667 (iPhone SE) |
+| Build check | `npm run build` (tsc -b && vite build) — PASS. No test/lint script exists. |
+| Git state | 23 changed/untracked files, all pre-existing user work. **Nothing was reverted, reset, or modified during this audit.** |
+
+### Safety boundary observed
+`JAVA_API_BASE` points at a deployed production service. I deliberately exercised **only GET reads** (navigation, forecast, alerts, climate, NWP, sectors, geocoding). **No mutating request was submitted to production.** The only non-GET traffic in the app is `POST /agent` and the route analyzer, both of which target the *local* ML service that is down, so neither reached any external system.
+
+---
+
+## Product / Journey Map
+
+```
+ENTRY (chat, primary view)
+  → ORIENTATION: "Ask anything about the weather anywhere." + 4 suggestion cards
+  → PRIMARY ACTION: ask a question  ──requires──▶ LOCATION
+  → INPUT: textarea (EN/हिं), voice button
+  → PROCESSING: POST localhost:8000/agent
+  → RESULT: answer card
+  → RECOVERY: "Clear chat"
+
+LOCATION (the hub every data page depends on)
+  4 entry points:
+    a) header pill  → browser geolocation
+    b) Weather map  → tap to select
+    c) Weather report → city search form
+    d) auto-fill on mount (if permission pre-granted)
+
+DATA PAGES (rail / drawer, 9 total)
+  Forecast · Map · Radar · Alerts & history · NWP Models · Sectors · Climate · Route Weather · Weather Report
+  Each: no location → NO request (verified). Location → fetch → loading / error+retry.
+
+MAP SUB-LAYERS: Overview · Temperature · Rain · Wind · Radar
+```
+
+**Journey graph — dead ends and gaps found**
+
+| Journey | State |
+|---|---|
+| Chat with no location | Works, but **no way to set a location from the chat view itself** — must go to Map or Report |
+| Location pill, permission **denied** | **Dead control — zero feedback** (P2-007) |
+| Location pill, permission granted | Works, auto-fills "New Delhi" |
+| Ambiguous city ("Kochi") | **Silently resolves to the wrong country** (P1-002) |
+| Route form, empty submit | **Silent no-op — no request, no message** (P2-005) |
+| AI chat, backend down | Honest message + "Clear chat" — good |
+| Route, backend down | **Raw exception string "Failed to fetch"** (P2-006) |
+| Refresh after choosing a location | **Location lost** (P2-004) |
+
+---
+
+## Persona Coverage
+
+| # | Persona | Exercised | Result |
+|---|---|---|---|
+| 1 | First-time non-technical | Entry screen, GPS denied, clicked obvious action, read guidance text | Blocked by P2-007; guidance text itself is good |
+| 2 | Technically educated | Coordinate input, re-navigation, keyboard-only, ambiguous names, 10+ rapid switches | P1-002, P2-015 found |
+| 3 | Confused | Literal reading of "Location unavailable", "Showing cached forecast", "Failed to fetch" | P2-006, P3-014 |
+| 4 | Impatient | 6 rapid sends, rapid layer switching | **No duplicate mutation, no stuck loader.** Input in-flight dedup works |
+| 5 | Mobile | 3 viewports, drawer, map, pill bar, touch targets | **P1-001, P2-003** |
+| 6 | Accessibility | Keyboard order, focus, names, headings, landmarks, contrast, inert drawer | P2-008/009/010, P2-011, P3-012 |
+| 7 | Malicious / spammy | XSS, SQLi, traversal, prompt injection ×4, exfiltration attempt | **No XSS, no injection surface reachable (backend down)** |
+| 8 | Malformed input | 13 payloads: empty, whitespace, 300 chars, emoji, RTL, quotes, HTML, SQL, path traversal, numeric, coords | No crashes; P3-015 found |
+| 9 | Repeated interaction | 6 rapid sends, 6 layer switches, page re-visits ×3 | Clean |
+| 10 | Terminology-naive | Scanned all copy for acronyms and internal vocabulary | P3-013 and terminology notes below |
+
+---
+
+## Critical Journeys Tested
+
+| Journey | Steps | Result |
+|---|---|---|
+| Set location via map | Map → tap → reverse geocode → pill updates | **PASS** |
+| Set location via report | Report → type city → Get weather | **PASS** (but see P1-002) |
+| Forecast | Location → Forecast nav | **PASS**, 1 request, 200 |
+| Map + all 5 layers | Location → Map → each layer pill | **PASS**, 0 extra requests per switch (grid cached) |
+| Radar | Location → Radar | **PASS**, 26 grid requests, 0 duplicates |
+| Alerts | Location → Alerts | **PASS** — "No severe weather warnings" (text, not colour alone) |
+| NWP | Location → NWP Models | **PASS** — every model named with resolution |
+| Climate / Sectors | Location → each | **PASS** |
+| Weather Report | Location → Report | **PASS** |
+| AI chat (11 prompts) | Send → response | **DEGRADED** — backend down, honest error every time |
+| Route Weather | Fill form → Analyze | **DEGRADED** — backend down, raw error string |
+| Theme toggle + persist | Toggle → reload | **PASS** — dark theme survives refresh |
+| Refresh persistence | Select city → reload | **FAIL** (P2-004) |
+
+---
+
+## Findings
+
+### P0 — Critical
+**None.** No crashes, no data loss, no security breach, no XSS, no unsafe mutation path found.
+
+---
+
+### P1 — High
+
+#### P1-001 · 2 of 5 map layers are unreachable on mobile
+- **Category:** BUG / RESPONSIVE
+- **Confidence:** HIGH (measured)
+- **Persona:** Mobile
+- **Route:** Map (any, at 390px or 375px)
+- **Repro:** Open Map at 390×844. Read `.map-toolbar` metrics.
+- **Expected:** All five layer pills (Overview, Temperature, Rain, Wind, Radar) reachable.
+- **Observed:**
+  ```
+  barClientW: 356   barScrollW: 666   overflowPx: 310
+  Wind   right: 427  offscreen: true
+  Radar  right: 516  offscreen: true
+  ```
+  Only Overview / Temperature / Rain are visible. **Wind and Radar are entirely off-screen.** The bar is `overflow-x: auto` with `scrollbar-width: thin` — there is no fade, chevron, or any other affordance signalling more content.
+- **Evidence:** `qa/13-degraded.mjs`, `qa/09-mobile.mjs`, screenshot `qa/77-mobile-map.png` (4th pill visibly sliced).
+- **Root Cause:** `WeatherMap.css` `.map-toolbar { flex-wrap: nowrap; overflow-x: auto }` with no responsive treatment for the pill row.
+- **User Impact:** A phone user cannot switch to Wind or Radar at all. 40% of the map's functionality is invisible. The Wind layer is the app's most developed surface.
+- **Recommendation:** Below ~560px, let the pill row wrap (`flex-wrap: wrap`) or scroll-snap with a visible edge fade. Wrapping is simplest and puts all five on screen.
+- **Alternatives:** (a) horizontal scroll + right-edge fade + snap points; (b) collapse to a `<select>`; (c) reduce pill padding/font on mobile only.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+---
+
+#### P1-002 · Ambiguous city names silently resolve to the wrong country
+- **Category:** BUG / TRUST
+- **Confidence:** HIGH (measured)
+- **Persona:** Technically educated, first-time
+- **Route:** Weather Report → search
+- **Repro:** Search `Kochi`, then `Kochi, Kerala`, then `Kochi, Japan`.
+- **Expected:** Either disambiguation, or at minimum the resolved country shown to the user.
+- **Observed:**
+  ```
+  "Kochi"          -> 23°C  Light drizzle  (Kochi, JAPAN — 33.55N 133.53E)
+  "Kochi, Kerala"  -> 28°C  Overcast        (Kochi, INDIA)
+  "Kochi, Japan"   -> 23°C  Light drizzle
+  header shows only "Kochi"; hasCountryWord: false
+  disambiguation UI: listboxes 0, options 0, combobox 0
+  ```
+  The geocoder *does* understand `City, Region`, but the UI gives the user no way to know which country they got, and no way to choose.
+- **Compound evidence — this mis-pairs an OFFICIAL WARNING with the WRONG COUNTRY'S FORECAST.** Searching bare `Kochi` produced this screen:
+  - Warning banner: **"YELLOW WARNING FOR KOCHI DISTRICT — IMD Yellow Watch: Moderate Rainfall (Today)"**, footed `Verbatim · India Meteorological Department`
+  - Forecast beneath it: **Kochi, Japan** — 23 °C, light drizzle, 5 km/h winds, Japanese September values
+  - Pill: `Kochi`
+
+  An authentic **India Meteorological Department warning for Kerala** is displayed directly above **Japanese** weather data under one unqualified name. The warning's provenance footer ("Verbatim · India Meteorological Department") makes the mis-pairing *more* dangerous, not less — it lends official credibility to a place the user is not in.
+- **Evidence:** `qa/11-place.mjs`; grid coordinates captured in `qa/dup-check.mjs` (`latitude=33.55&longitude=133.53333`); screenshot `docs/qa-evidence/P1-002-kochi-resolves-japan.png`.
+- **Root Cause:** `WeatherReportView` sends only `location=<string>` and renders only the returned city name. The API layer already supports authoritative coordinates (`encodeLocationQuery` in `config/api.ts`) — the report search just never surfaces the resolved country/region or offers a choice.
+- **User Impact:** **This is the app's core trust claim broken in one keystroke.** A user asking about Kochi, Kerala is shown Japanese weather under an Indian-looking city name — and, as the evidence shows, an *official IMD warning for Kerala* attached to that Japanese forecast. A safety-relevant warning is presented to someone outside the warned area, while a user actually in Kerala is shown the wrong hemisphere's weather. For a product built on IMD warnings and Indian agriculture/aviation sectors, this is the most damaging class of defect I found.
+- **Recommendation:** Show `Kochi, Kerala, India` (resolved admin area + country) in the result header, and add a typeahead that lists candidates with country when a name is ambiguous.
+- **Alternatives:** (a) header-only disclosure, no picker; (b) typeahead with country, disambiguate only on collision; (c) default the geocoder to `language=en&count=5` and prefer the India match for this product.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+---
+
+### P2 — Medium
+
+#### P2-003 · Per-layer honesty note is clipped and collides with the zoom control on mobile
+- **Category:** BUG / RESPONSIVE · **Confidence:** HIGH (measured) · **Persona:** Mobile
+- **Route:** Map, Wind or Overview layer, when a layer's data fails
+- **Repro:** Mobile 390px. Render `.map-layer-note` with its real class and the longest realistic copy.
+- **Observed:**
+  ```
+  noteWidthPx 362  mapSurfaceWidth 356  overflowsMapBy 6
+  clippedLeft: true   clippedRight: true
+  whiteSpace: "nowrap"
+  overlapsZoom: true          <-- collides with the +/- control
+  ```
+  Desktop (1440px) is clean: no clipping, no overlap.
+- **Evidence:** `qa/note-measure.mjs`; screenshot `qa/77-mobile-map.png` shows the text sliced on both sides ("erature and Rain and Wind data unavailable right now.").
+- **Root Cause:** `.map-layer-note { left:50%; transform:translateX(-50%); white-space:nowrap }` inside `.map-surface { overflow:hidden }`.
+- **User Impact:** The very message that exists to be honest about missing data becomes unreadable exactly when it's needed most.
+- **Recommendation:** `white-space: normal`, `max-width: calc(100% - 24px)`, and move it below the top edge (or above the legend) so it cannot meet the zoom control.
+- **Alternatives:** keep nowrap but reduce copy to a short form ("Wind data unavailable") plus a tooltip.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-004 · Selected location is lost on refresh
+- **Category:** BUG · **Confidence:** HIGH · **Persona:** Technically educated
+- **Route:** any → select location → reload
+- **Repro:** Search `Kochi, Kerala`, reload.
+- **Observed:** `BEFORE {pill:"Kochi"}` → `AFTER {pill:"Location unavailable"}`. The location is gone.
+- **Expected:** The report page states *"Forecast is cached for offline use."* A user reloads and is back to no-location.
+- **Root Cause:** Location lives in React state (`LocationContext`) with no persistence; only the forecast payload is cached (`saveForecast`/`loadCachedForecast` in `App.tsx`).
+- **User Impact:** The offline promise is half-implemented — the data is cached but the user cannot get back to it without retyping the city. Directly contradicts on-screen copy.
+- **Recommendation:** Persist the last selected location (name + coords) to `localStorage` and restore on mount; treat it as a *previous* selection, not an automatic GPS grab.
+- **Alternatives:** restore only the cached report and label it clearly as cached.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-005 · Route form: "Analyze route" is never disabled and empty submit is a silent no-op
+- **Category:** BUG / UX · **Confidence:** HIGH · **Persona:** Confused, impatient
+- **Route:** Route Weather
+- **Observed:**
+  ```
+  both empty      disabled=false netEvents=0   (no message)
+  origin only     disabled=false netEvents=0   (no message)
+  gibberish both  disabled=false netEvents=1   -> "Failed to fetch"
+  same o/d        disabled=false netEvents=1   -> "Failed to fetch"
+  ```
+  Submitting an empty form does nothing at all: no request, no validation message, no focus move.
+- **Root Cause:** The submit button has no `disabled` binding and the handler bails without feedback when fields are empty.
+- **User Impact:** A user who taps the primary CTA gets silence and cannot tell whether the app is broken or they did something wrong.
+- **Recommendation:** Disable the button until both origin and destination are non-empty, and show an inline hint on the empty fields.
+- **Alternatives:** keep enabled but show a visible validation message on submit.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-006 · Raw exception text shown to users, inconsistent with the chat's own error copy
+- **Category:** COPY/CLARITY · **Confidence:** HIGH · **Persona:** Confused
+- **Route:** Route Weather vs Chat — **same down backend**
+- **Observed:**
+  ```
+  chat  says: "Sorry, I couldn't connect to the WeatherGPT agent. Please check your connection and try again."
+  route says: "Failed to fetch"
+  ```
+- **Root Cause:** The chat routes failures through a diagnostic wrapper; Route renders `err.message` directly.
+- **User Impact:** "Failed to fetch" is developer vocabulary, tells a non-technical user nothing, and the inconsistency makes the app feel unfinished.
+- **Recommendation:** Reuse the chat's human phrasing in Route, and keep the technical detail in `console` only.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-007 · "Location unavailable" pill is a dead control
+- **Category:** UX / FEEDBACK · **Confidence:** HIGH · **Persona:** First-time non-technical
+- **Route:** header, when geolocation permission is denied
+- **Repro:** Deny geolocation, click the pill.
+- **Observed:** `toasts: []`, `liveText: []`, pill text unchanged, no state change. **Zero feedback of any kind.**
+- **Contrast:** with permission granted the same click works (auto-fills "New Delhi").
+- **Root Cause:** The geolocation failure path sets a label but raises no announcement, toast, or inline explanation.
+- **User Impact:** The most obvious control for a first-time user does nothing when it fails. This is also the primary dead end for anyone who declines location permission — which is a large share of users.
+- **Recommendation:** On denial, show a short inline message on the pill ("Location access blocked — tap to try again" or a link to the city search), and announce it via the existing live region.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-008 · City search input has no accessible name
+- **Category:** ACCESSIBILITY · **Confidence:** HIGH · **Persona:** Screen reader
+- **Route:** Weather Report
+- **Observed:** `ariaLabel: null, labelsCount: 0, title: null, id: "", name: ""` → computed accessible name **NONE**. Placeholder `"Enter a city"` is the only signal.
+- **User Impact:** A screen reader announces an unlabelled text field. Placeholders vanish on input and are inconsistently announced.
+- **Recommendation:** Add a visually-hidden `<label>` (the Route form already does this correctly with `Origin` / `Destination` — the codebase has the right pattern).
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-009 · Location pill's accessible name is a state, not an action
+- **Category:** ACCESSIBILITY / COPY · **Confidence:** HIGH
+- **Observed:** `button.location-pill`, text `"Location unavailable"`, `title="Use my location"`, **no `aria-label`**.
+- **User Impact:** A screen reader announces "Location unavailable, button" — the user learns the state but not that activating it retries. `title` is an unreliable supplement and is suppressed when the visible text differs.
+- **Recommendation:** `aria-label="Use my location"` (or make the visible text action-oriented, e.g. "Use my location" with state conveyed separately).
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-010 · No `h1` on most views; heading levels inconsistent
+- **Category:** ACCESSIBILITY / IA · **Confidence:** HIGH
+- **Observed:** Chat → `h2`. Forecast, Map, Alerts, NWP, Sectors, Climate, Route, Report → `h2`. **Radar → `h1`.** On the chat view `h1: []`, `headingSequence: [2]`.
+- **User Impact:** Screen-reader heading navigation has no page-level anchor on most views; Radar is structurally inconsistent with its nine siblings.
+- **Recommendation:** One `h1` per view naming the page ("Radar", "7-day forecast", "Route weather"), demote current `h2`s.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+#### P2-011 · ~~`--watch-orange` fails WCAG AA for normal-size text~~ — **NOT_A_DEFECT (retracted)**
+
+> **RETRACTED — this was my measurement error.** I measured `--watch-orange`
+> (3.34:1) but the isobar "L" glyph actually renders in
+> `--watch-orange-deep` (`#8F540F`) = **6.10:1**, which passes AA for normal
+> text. `--watch-orange` is used only for the system *ring*, a non-text graphic
+> element whose requirement is 3:1 — and 3.34:1 passes. No code was changed for
+> this finding and none was needed.
+
+- **Category:** ACCESSIBILITY · **Confidence:** MEDIUM
+- **Measured contrast (light theme):**
+  ```
+  body text      --ink on --paper   16.04:1  PASS-AA
+  muted text     --muted on --paper  5.57:1  PASS-AA
+  links/accent   --slate-teal        5.76:1  PASS-AA
+  watch-red      --watch-red         5.90:1  PASS-AA
+  brass          --brass             4.01:1  large-text only
+  watch-orange   --watch-orange      3.34:1  large-text only  <-- used at 13px bold
+  ```
+- **User Impact:** The isobar low-pressure "L" marker renders `--watch-orange` at `13px/800`. WCAG "large text" is ≥18.66px bold, so this is normal-size text at 3.34:1 — **below the 4.5:1 minimum**. The letter may be hard to read for low-vision users, and it is the marker for a meteorologically significant system.
+- **Recommendation:** Darken `--watch-orange` for text use (keep the token for fills), or set the "L" glyph in a darker orange / larger size.
+- **Note:** `--watch-orange` is deliberately not used for any *body* text elsewhere, which limits the blast radius. Contrast of other token pairs is genuinely good.
+- **Status:** NOT_A_DEFECT
+  Retracted: this was a measurement error on my part. The glyph renders in `--watch-orange-deep` (#8F540F) at 6.10:1, which passes WCAG AA for normal text. `--watch-orange` (3.34:1) is used only for the system ring, a non-text graphic element whose requirement is 3:1, and it passes that. No code change was made, and none was needed.
+
+---
+
+### P3 — Low
+
+#### P3-012 · Mobile touch targets below 44px
+10 targets under 44px at 390px: `EN` 28×23, `हिं` 22×23, `Send message` 34×34, `Ask by voice` 34×34, `Open navigation` 36×36, `Switch to dark theme` 36×36, `Privacy Policy` 73×17. The language toggles at 22–23px tall are the worst. On tablet the nine rail buttons are 40×40 (19 targets under 44px).
+**Recommendation:** ≥44px hit area on mobile (padding or a pseudo-element expansion — visual size need not change).
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+
+#### P3-013 · Body scroll is not locked while the mobile drawer is open
+`bodyScrollLocked: "visible"` with the drawer open and a backdrop present. On touch, the page behind can be scrolled while the drawer is open.
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+
+#### P3-014 · Cached-location fallback does not name which location is cached
+Searching `zzzqqqxxyyvvv` yields "Location not found. Showing cached forecast." and then displays a **different** city's data. The behaviour is honest (it says "cached") and the cached city's name is shown in the heading — but the message itself doesn't connect the two, which reads as a glitch.
+**Recommendation:** "Couldn't find *zzzqqqxxyyvvv*. Showing the cached forecast for **Kochi**."
+- **Status:** OPEN (deferred to backlog)
+  Open by decision: explicitly deferred out of this pass. Not started.
+
+Open by decision: explicitly deferred out of this pass. Not started.
+
+
+#### P3-015 · Coordinate input is not supported by the report search
+`9.9312,76.2673` → "Location not found". The API layer already accepts authoritative coordinates (`encodeLocationQuery`); the report search only sends `location=`.
+**Recommendation:** Detect a `lat,lon` pair client-side and send coordinates.
+- **Status:** OPEN (deferred to backlog)
+  Open by decision: explicitly deferred out of this pass. Not started.
+
+Open by decision: explicitly deferred out of this pass. Not started.
+
+
+#### P3-016 · Raw ISO-8601 timestamp with microseconds shown to users
+The warning card's provenance footer renders `2026-09-26T13:59:51.369943Z` verbatim. Six decimal places of a UTC instant is machine output. Elsewhere the app formats times well ("Updated 9/26/2026, 7:29:50 PM", "19:10 IST"), so this is an inconsistency as well as a polish issue.
+**Evidence:** `docs/qa-evidence/P1-002-kochi-resolves-japan.png`
+- **Status:** FIXED
+  Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+Verified by assertion. Suite and counts are in the Remediation log at the end of this report.
+
+
+---
+
+## Strong Existing Patterns
+
+These are genuinely good and should be protected during any refactor:
+
+1. **Per-layer honesty actually works.** A partial failure no longer blanks the whole view — the full-view banner fires only when the grid itself fails. This is the product's differentiator and it is implemented correctly, not just claimed.
+2. **Severity is never colour-only.** "No severe weather warnings for Kochi" states the status in words; the green/normal state is also labelled.
+3. **NWP provenance is excellent.** Every model is named with its resolution — "GFS (NOAA NCEP) (13 km)", "ECMWF (IFS HRES) (9 km (High Resolution))", "ICON (DWD Germany) (11 km)" — plus a consensus percentage. This is better than most production weather UIs.
+4. **No request storms.** Map 26 requests / 25 unique (1 benign StrictMode double-fetch), Radar 26/26 unique, revisiting a page 1 request, switching map layers **0** requests. In-flight dedup is implemented.
+5. **No XSS across 13 payloads** (script tags, SQLi, path traversal, quotes, emoji, RTL) — nothing became live DOM, nothing was echoed raw.
+6. **The closed mobile drawer is correctly `inert` + `visibility: hidden`**, and tab order skips it entirely (0 focus stops). Many apps get this wrong.
+7. **Focus is visible everywhere** (`outline: auto 1px` on all 14 sampled stops), tab order is logical, `positiveTabindex: 0`.
+8. **Theme persists across reload.**
+9. **Impatient-user safety holds** — 6 rapid sends produced no duplicate mutation and no stuck loader.
+10. **No location → no request** is honoured on all nine data pages.
+
+---
+
+## Regression Risks
+
+| Risk | Why |
+|---|---|
+| `config/api.ts` points at **production** | Any future QA that POSTs will mutate a deployed service. Worth a `.env`-based switch. |
+| Weather Map internals are in active flux | 5 of the 23 changed files are the map (`WeatherMapView.tsx`, `WeatherMap.css`, `mapData.ts`, `windStreamlines.ts`, `pressureLayer.ts`). Leaflet pane ordering was recently restructured; the isobar/streamline layer sits in a custom `fieldPane` at z-index 500 and is easy to break. |
+| Location is single-source state | Every page depends on it. P2-004's persistence fix touches all nine. |
+| `App.tsx` is 1887 lines in one file | `RouteMap`, `RouteOverviewMap`, `WeatherReportView`, `RouteWeatherView` and the whole page shell live together. High regression surface for any route/report change. |
+| No automated tests | `npm run build` is the only gate. `tests/` holds two `.test.ts` files and one Python test, none wired into a script. |
+
+---
+
+## Coverage Gaps
+
+Stated plainly — these were **not** tested:
+
+1. **The AI itself.** `localhost:8000` is down (missing `typing_extensions`, no Ollama). All 11 prompts — including 4 prompt-injection attempts — reached only the error path. **Untested:** prompt-injection *efficacy*, system-prompt leakage, hallucination boundaries, output structure, streaming, retry, multi-turn context, refusal quality. I have **no evidence** about the safety of the agent's prompt construction; I only verified the client renders failures honestly.
+2. **Route Weather end-to-end.** Same cause. Map/timeline/route-picker rendering is unverified with real data.
+3. **Voice input/output.** No microphone, no STT service running.
+4. **Java backend** was exercised only through the deployed instance. No local `mvn test` (Java toolchain not started).
+5. **Dark mode** — audited by token contrast and one screenshot, not a full visual pass of all nine pages.
+6. **Only Chromium.** No Firefox/WebKit, no real touch device, no screen-reader automation (axe/Lighthouse not available in this environment) — accessibility findings come from DOM/computed-style inspection, not from an AT.
+7. **No load/stress testing**, and I deliberately did not attempt any.
+8. **Offline behaviour** — the report claims caching for offline use; I did not test a real offline session.
+
+---
+
+## Recommended Fix Order
+
+1. **P1-002** wrong-country weather — trust-destroying, affects every user who searches a duplicate name.
+2. **P1-001** mobile layer pills — 40% of map functionality unreachable on phones.
+3. **P2-003** clipped honesty banner — the honesty feature fails on mobile.
+4. **P2-004** location persistence — contradicts on-screen copy.
+5. **P2-005 / P2-006** Route form feedback and error copy — small, contained.
+6. **P2-008 / P2-009** accessible names — trivial, high value.
+7. **P2-007** location pill feedback — closes the main first-run dead end.
+8. **P2-010 / P2-011** headings and contrast.
+9. P3 batch.
+
+---
+
+# Remediation Round 2 — OpenRouter migration, P1-001, P1-002
+
+## Executive Summary
+
+The provider migration from a local Ollama server to **OpenRouter** is complete
+and verified at every layer I can verify without a key. **No LLM request has
+ever reached a real model in this environment**, so PROMPT-001 remains BLOCKED
+— on a missing credential, not on a code defect. Two genuine defects surfaced
+while chasing it and both are fixed and verified.
+
+| Area | Status | Evidence |
+|---|---|---|
+| P1-001 mobile map pills | **FIXED** | 59/59 assertions, 4 viewports |
+| P1-002 IMD jurisdiction | **FIXED** | 20/20 assertions, ZERO IMD requests for non-India |
+| P2-003 clipped honesty note | **FIXED** | 332px note in 356px map, no clipping, no zoom overlap |
+| P2-008 city input name | **FIXED** | real `<label>`, 1×1 clipped |
+| P2-009 pill names a state | **FIXED** | `aria-label="Use my location"` |
+| P2-010 heading levels | **FIXED** | exactly one `h1` on all 10 views |
+| P2-011 contrast | **NOT_A_DEFECT** | retracted — measured the wrong token |
+| Ollama → OpenRouter | **DONE (config)** | no `ChatOllama`/`11434`/fallback anywhere |
+| `/health` 404 | **FIXED** | HTTP 200, truthful, no LLM call |
+| Python env split | **FIXED** | one venv, all imports verified under it |
+| Query B generic error | **FIXED** | failure-class-specific copy |
+| Fast-path place grammar | **FIXED** | "Greater Noida right" → "Greater Noida" |
+| **PROMPT-001** | **BLOCKED** | **no `OPENROUTER_API_KEY` in this environment** |
+
+## Provider Migration (implementation + remediation item)
+
+| | |
+|---|---|
+| **Provider** | `openrouter` — sole provider, no fallback branch |
+| **Client** | `langchain_openai.ChatOpenAI` (OpenAI-compatible) |
+| **Base URL** | `https://openrouter.ai/api/v1` |
+| **Model** | `google/gemma-4-26b-a4b-it:free` (verified in the live catalog: 458 models, 17 free, this one advertises tool calling **and** structured outputs) |
+| **Config** | `OPENROUTER_API_KEY` (required), `LLM_MODEL`, `OPENROUTER_BASE_URL` — environment only |
+| **Ollama** | **removed**: `ChatOllama`, `langchain_ollama`, `LLM_PROVIDER` branch, `localhost:11434`, `OLLAMA_MODEL`/`OLLAMA_BASE_URL`, and the duplicate `ChatOpenRouter` import are all gone |
+
+Verified removal:
+```
+grep -rn "ChatOllama|langchain_ollama|11434" --include=*.py ML/
+  -> CLEAN (only the comment stating they were removed)
+ML/requirements.txt: langchain-ollama removed, langchain-openai>=0.3.0 added
+```
+
+`ML/smoke_test_llm.py` was written to prove the real chain
+(`ChatOpenAI → OpenRouter → model → tool call → tool result → answer`). It
+**could not be run**: it exits 2 with `OPENROUTER_API_KEY is not set`. It is
+committed so the operator can run it the moment a key exists, rather than
+re-deriving the test.
+
+## Python Interpreter (was: /usr/bin/python vs python3 split)
+
+The split is resolved at the project level, not by touching system Python.
+
+```
+interpreter      : /home/abhay/Documents/projects/SIH-WeatherGPT/.venv/bin/python
+Python           : 3.14.7
+startup command   : .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+                    (equivalent to start.sh, which already prefers $PROJECT_DIR/.venv)
+langchain-openai  : OK
+requests          : OK
+fastapi 0.141.1 · uvicorn 0.52.4 · pydantic 2.13.5 · langchain 1.4.2
+import main       : OK      (routes: /, /agent, /health, /route-weather)
+import agent      : OK      (has ChatOllama attr: False)
+```
+
+The venv did not exist, so `start.sh`'s `python_cmd()` fell through to system
+`python3` — the interpreter without `requests`. It now exists and is the
+documented path. Nothing was installed into system Python.
+
+## /health
+
+```
+GET /health -> HTTP 200
+{"status":"ok","service":"weathergpt-ml","version":"1.0.1",
+ "model_provider":"openrouter","model_provider_configured":false}
+```
+
+Previously **404**. It is cheap (no LLM completion), names no Ollama, and
+distinguishes **application liveness** (`status`) from **provider
+configuration** (`model_provider_configured`). It deliberately does not claim
+provider *readiness* — that would require a call.
+
+## P1-001 — FIXED (Option A: wrap)
+
+Cause: the five pills need 666px; `overflow-x: auto` pushed Wind and Radar
+off-screen on a phone with no affordance, making 40% of the layers unreachable.
+
+Fix: `flex-wrap: wrap` at `max-width: 900px` with the coordinate readout on its
+own row. The breakpoint is 900 rather than 560 because a 768px tablet was ALSO
+overflowing (measured 666/658).
+
+| Viewport | Layout | All 5 visible | Tappable | Zoom overlap | Badge overlap | Overflow |
+|---|---|---|---|---|---|---|
+| 375×667 | 2 rows | PASS | PASS | none | none | none |
+| 390×844 | 2 rows | PASS | PASS | none | none | none |
+| 768×1024 | 1 row | PASS | PASS | none | none | none |
+| 1440×900 | 1 row | PASS | PASS | none | none | none |
+
+**59/59 assertions.** Radar and Wind were each clicked and confirmed to switch
+the active layer; the wind layer renders streamlines afterwards.
+
+## P1-002 — FIXED
+
+Three real defects, all verified:
+
+1. **Unqualified names.** `count=1` geocoding silently returned Kochi *Japan*
+   for "Kochi". Now `count=10` + collision detection + a picker, and the stored
+   name is qualified (`Kochi, Kerala, India`) so no downstream surface can
+   unqualify it.
+2. **District from display name** — `"${location.name} district"` produced
+   `Kochi, Kochi, Japan district`. Districts are now reverse-geocoded
+   independently (`SelectedLocation.district`) and stored separately.
+3. **IMD called for foreign coordinates** — an Indian district warning rendered
+   above Japanese weather. `fetchAlerts` is now gated on the resolved country
+   (`isInIndia`); non-India makes **zero** IMD requests and shows a neutral
+   `No IMD warning coverage for this location` (never "IMD Green", which would
+   assert a check IMD never performed).
+
+| Case | Country | District | IMD requests | UI |
+|---|---|---|---|---|
+| Kochi, Kerala | India ✓ | Kochi ✓ | 1 (allowed) | normal |
+| Kochi, Japan | Japan ✓ | — | **0** | no-coverage |
+| Mumbai | India ✓ | Mumbai ✓ | 1 (allowed) | normal |
+| Reykjavik | Iceland ✓ | — | **0** | no-coverage |
+
+**20/20 assertions**, including the required zero-IMD-request assertion.
+
+## Query B — root cause and fix
+
+**Your split-path hypothesis was correct, and Query A is not evidence the LLM
+works.**
+
+```
+Query A "What's the current weather forecast for my location?"
+  -> HTTP 200   x-response-path: fast_path     23.2°C, moderate drizzle, rain chance 67%
+
+Query B "i need to travel to pari chowk from Gaur Yamuna City, is it safe to carry an umbrella today ?"
+  -> HTTP 503   (no path header)               OPENROUTER_API_KEY is not set
+```
+
+Query A is the regex fast path (`main.py:fast_weather_response`) — no model
+involved. Query B has no weather-keyword-and-place match, so it falls through
+to the agent, which cannot build a client without a key.
+
+**First real exception:** not a tool-call problem. The agent is never
+constructed. `/health` reports `model_provider_configured: false`, and the
+backend process env has 0 occurrences of `OPENROUTER_API_KEY`.
+
+Two defects found while tracing, both fixed:
+
+- **Generic error collapse.** The frontend caught every failure and said
+  "Sorry, I couldn't connect…", hiding a 503 (not configured) from a 502
+  (provider down). Now class-specific: 503 / 502 / 400-422 / transport, with
+  the backend detail logged for operators and never shown to the user. No
+  URLs, keys, or tracebacks reach the UI.
+- **Fast-path place grammar.** The capture regex kept filler words:
+  `in Greater Noida right now` → place `"Greater Noida right"` → geocoder
+  correctly reported no such place. `extract_place()` now trims trailing
+  filler and returns `None` for pronouns, so `"my location"` falls through to
+  the model instead of geocoding a non-place. Verified: Greater Noda, Mumbai,
+  New York, Kochi, Delhi, Chennai all resolve; `"my location"` → 503 (fallthrough).
+
+**Agent capability, stated explicitly.** The agent has exactly two tools —
+`geocode_place`, `get_weather`. There is **no route/journey tool**, so route
+weather cannot be produced. The system prompt now says so, requires the model
+to separate weather FACT / INFERENCE / RECOMMENDATION, forbids implying it
+checked a route, and forbids recommending an umbrella unless retrieved data
+supports it. This was a prompt-architecture decision, so it is logged in
+QA_DECISIONS.md rather than made silently.
+
+## PROMPT-001 — BLOCKED
+
+**Provider:** openrouter · **Model:** `google/gemma-4-26b-a4b-it:free`
+**Reachable:** NO (no key) · **Real LLM inference:** NO · **Tool calling:** UNVERIFIED
+
+| Bucket | Count | Detail |
+|---|---|---|
+| Fast-path tests | 4 | Query A, Greater Noida, Mumbai rain, coordinate query — **not LLM coverage** |
+| Real model-backed tests | **0** | — |
+| Failed to reach model | 2 | Query B, "LLM_OK" — both 503 |
+| Provider errors | 0 | never reached the provider |
+| Injection payloads re-run | **0** | not re-run; prior results are discarded |
+
+**No secret leakage was observed in the tested payloads — because no payload
+reached a model.** That is not a security result. I am not claiming prompt
+injection passed and I am not calling the AI secure.
+
+To unblock, export a key and run:
+
+```bash
+OPENROUTER_API_KEY=... .venv/bin/python ML/smoke_test_llm.py
+```
+
+The smoke test asserts a real tool call, real tool execution, and that the
+tool's output reaches the final answer — not merely HTTP 200.
+
+## Limitations
+
+- No model-backed prompt testing. Injection, leakage, hallucination-boundary,
+  tool-argument and refusal behaviour are all **unmeasured**.
+- Model/tool-call compatibility is **advertised by OpenRouter, not verified at
+  runtime** — the smoke test exists precisely to close this and has not run.
+- `smoke_test_llm.py` has never executed; treat it as unverified code.
+- Only Chromium; no real AT, no Safari/Firefox.
+- `JAVA_API_BASE` points at production. Only GETs were exercised.
+- The IMD gate keys on the geocoder's `country` string. If a location resolves
+  without one, IMD is correctly skipped — safe by default, but a genuine
+  Indian place lacking a country would lose its warnings.
+- The route-journey capability is still **absent**; this round made the agent
+  honest about that rather than adding route data.
+
+## Regression
+
+| Suite | Result |
+|---|---|
+| P1-001 pills | 59/59 |
+| P1-002 IMD | 20/20 |
+| Query B diagnosis | 21/21 |
+| Full regression | 53/53 |
+| **Total** | **153/153** |
+
+9 pages · 13 critical journeys · 5 map layers · 4 viewports · keyboard · forms
+· disambiguation. **0 page errors, 0 unexpected 5xx, 0 layout overflow.**
+The only non-200 is the expected 503 from `/agent` with no key.
+
+---
+
+# Remediation Round 3 — Query B root cause, and four defects it uncovered
+
+## Executive Summary
+
+**The split-path hypothesis was correct. Query A never reached a model and is
+not evidence the LLM works.** Query A is the regex fast path; Query B needs the
+agent, and the agent cannot be constructed because `OPENROUTER_API_KEY` is not
+set in this environment.
+
+The blocking condition is a **missing credential, not a code defect**. It is not
+fixable from here and I have not faked, stubbed, or special-cased anything to
+make Query B return 200.
+
+Chasing it did surface four real defects, all now fixed and verified. Two of them
+were actively answering with the **wrong country's weather**.
+
+| # | Defect | Severity | Status |
+|---|---|---|---|
+| ML-1 | Frontend collapsed every failure into one generic message | P1 | FIXED |
+| ML-2 | Place capture dropped an explicit `, Country` qualifier | **P1** | FIXED |
+| ML-3 | Geocoder `count=1` silently resolved ambiguous names | **P1** | FIXED |
+| ML-4 | Answer named a bare city, hiding which country was used | P2 | FIXED |
+| ML-5 | First weather request after startup failed at the 10s timeout | P3 | FIXED (defensive) |
+| VS-1 | `start.sh setup` never installs `voice_service/requirements.txt` | P1 | **DECISION NEEDED** |
+| VS-2 | Voice service could not start under the new `.venv` | P1 | FIXED (partial) |
+
+## Query B — the actual root cause
+
+```
+Query A "What's the current weather forecast for my location?"
+  HTTP 200   x-response-path: fast_path    22.7°C, moderate drizzle, rain chance 67%
+
+Query B "i need to travel to pari chowk from Gaur Yamuna City, is it safe to
+         carry an umbrella today ?"
+  HTTP 503   (no path header)             OPENROUTER_API_KEY is not set
+```
+
+**First real exception: there isn't one — the agent is never built.**
+`/health` reports `model_provider_configured: false`; the backend process
+environment contains 0 occurrences of `OPENROUTER_API_KEY`; the request returns
+503 in ~30ms, far too fast for a network call. It is not a tool-call,
+tool-schema, message-format, or model-compatibility problem, because no model is
+contacted.
+
+Evidence that it is not a tool-calling problem: the controlled model-only request
+`"Reply with exactly: LLM_OK"` — which uses no tools and no weather keyword —
+fails identically with 503. Provider integration is therefore **UNVERIFIED**, not
+broken-and-diagnosable.
+
+## ML-2 — the qualifier was silently discarded (P1)
+
+The place-capture character class was `[A-Za-z .'-]`, which excludes `,`, so:
+
+```
+"What is the weather in Kochi, Japan right now?"  ->  place = "Kochi"
+```
+
+The user explicitly said **Japan** and the system discarded it. Verified before
+the fix: `Kochi`, `Kochi, Kerala` and `Kochi, Japan` all returned **byte-identical
+weather** (21.7 °C, light drizzle, humidity 88%) — Japan's answer presented for
+an Indian query in an IMD-aligned product.
+
+A comma now continues a place name when a capitalised word follows (a region
+qualifier) and ends it otherwise, so `"Kochi, and should I wear boots"` still
+stops at the comma. After the fix the two Kochi queries return **different**
+weather: 22.2 °C Japan vs 26.9 °C Kerala.
+
+> Implementation note worth keeping: the capital-letter test needed
+> `(?-i:[A-Z])`. Under `re.IGNORECASE` a bare `[A-Z]` also matches lowercase, so
+> the negative lookahead failed at *every* comma and swallowed the rest of the
+> sentence. That produced the over-capture `"Kochi, and should I wear boots"`
+> before the scoped group was added.
+
+## ML-3 — ambiguous names resolved by coin flip (P1)
+
+`geocode_place` requested `count: 1`, so the geocoder's top-ranked result was
+taken as gospel. Bare `Kochi` ranked **Kochi, Japan** first.
+
+Now `count: 5`, with an `ambiguous` flag when candidates span more than one
+country, plus the candidate list. The fast path asks instead of guessing:
+
+```
+"Kochi" matches more than one place (Kochi, Japan; Kochi, Kerala, India;
+ Kōchi, Shizuoka, Japan). Which one did you mean?
+```
+
+No weather is produced for an unresolved place.
+
+**Qualifier verification.** Some country spellings are not indexed inside a
+comma query (`New York, USA` → 0 results, `New York` → 5; `London, UK` → 0). A
+naive retry on the leading component would be dangerous: `Rome, Japan` would
+resolve to Rome, **Italy** and report another country's weather. So a fallback is
+accepted only when the qualifier matches a candidate's country or region
+(aliases handle `USA`/`US`/`UK`/`England`):
+
+```
+New York, USA  -> New York, United States: 14.0°C, ...
+London, UK     -> London, England, United Kingdom: 20.9°C, ...
+Rome, Japan    -> "Found Rome, but not in Japan. Please specify the city and
+                  country more precisely."      (refuses; no Italian weather)
+```
+
+## ML-1 — generic error collapse (P1)
+
+The frontend caught every failure and said *"Sorry, I couldn't connect to the
+WeatherGPT agent"*, hiding a 503 (not configured) from a 502 (provider down) and
+from a transport failure. Now classified: 503 / 502 / 400–422 / transport. The
+backend detail is logged for operators and never rendered. Verified: no
+traceback, exception string, provider URL, key name, or `11434` reaches the DOM.
+
+## ML-4 / ML-5 — smaller fixes
+
+- **ML-4** the answer named the geocoder's bare `name`, so Japan's result printed
+  as `Kochi: 21.7°C`. Answers now carry the place actually used —
+  `Kochi, Kerala, India`, `Greater Noida, Uttar Pradesh, India` — without
+  repeating a name as its own region (`Kochi, Kochi, Japan`).
+- **ML-5** the first weather request after startup failed at exactly 10.3 s (the
+  timeout) while later calls took 0.9–1.5 s, so a user's *first* question
+  reliably failed. One retry on transport failure. **Honest limit:** I could not
+  reproduce the cold start again once OS DNS/TLS caches were warm, so this is
+  defensive and its benefit under the original condition is unproven.
+
+## VS-1 / VS-2 — the venv I created broke the voice service
+
+Creating `.venv` made `start.sh` prefer it for **both** Python services. I had
+installed only `ML/requirements.txt`, so the voice service died on startup:
+
+```
+RuntimeError: Form data requires "python-multipart" to be installed.
+[WARN] Voice service exited.
+```
+
+The root defect is in `start.sh`: `setup_project()` (lines 181–186) installs
+**only** `ML/requirements.txt` and never `voice_service/requirements.txt`, so the
+documented setup path can never satisfy the service it then starts.
+
+`python-multipart` is installed and the service now starts and reports honestly:
+
+```
+GET /health -> {"status":"healthy","voice_enabled":false,
+                "stt_available":false,"tts_available":false}
+```
+
+It is **not functional**: `openai-whisper`, `gTTS` and `pyttsx3` are still absent,
+so `/stt/transcribe` and `/tts/speak` will fail on use. I did not install them —
+`openai-whisper` pulls PyTorch, a multi-GB download, and the repository working
+agreement requires approval for model downloads. This is the open decision below.
+
+## Regression Test Matrix (requirement 12)
+
+29 payloads, each classified from the `X-Response-Path` header and status.
+
+| Group | FAST_PATH | LLM_BACKED | TOOL_BACKED | FAILED_TO_REACH_MODEL | PROVIDER_ERROR |
+|---|---|---|---|---|---|
+| A simple weather | 4 | 0 | 0 | 0 | 0 |
+| B LLM-only control | 0 | 0 | 0 | 3 | 0 |
+| C named-city tool | 2 | 0 | 0 | 1 | 0 |
+| D contextual weather | 0 | 0 | 0 | 2 | 0 |
+| E travel + weather | 0 | 0 | 0 | 3 | 0 |
+| F ambiguous location | 3 | 0 | 0 | 0 | 0 |
+| G non-India | 2 | 0 | 0 | 1 | 0 |
+| H multilingual | 0 | 0 | 0 | 3 | 0 |
+| I prompt injection | 1 | 0 | 0 | 4 | 0 |
+| **Total** | **12** | **0** | **0** | **17** | **0** |
+
+**`LLM_BACKED` is 0. No payload in this matrix reached a model.** Every
+non-fast-path result is a truthful 503. Consequently:
+
+- The injection group (I) proves **nothing** about prompt-injection resistance.
+  Four payloads never reached a model; the fifth was answered by the fast path
+  from real weather data, not by a model resisting anything.
+- Tool-call compatibility is **unverified**. The model page advertises tool
+  calling; I have not seen a tool call execute.
+- I am **not** claiming the AI is secure or that PROMPT-001 passed.
+
+## Acceptance criteria status
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | Query A still works | **MET** — 200, `fast_path`, real data |
+| 2 | Query B reaches the real OpenRouter model | **BLOCKED** — no key |
+| 3 | Controlled LLM request succeeds | **BLOCKED** — 503 |
+| 4 | Controlled tool call succeeds | **BLOCKED** — 503 |
+| 5 | Query B completes end-to-end | **BLOCKED** — 503 |
+| 6 | No Ollama path involved | **MET** — zero `ChatOllama`/`11434`; port closed |
+| 7 | No new console errors | **MET** — 0 page errors, 0 tracebacks in the log |
+| 8 | No 4xx/5xx for passing journeys | **MET** — only the expected 503 |
+| 9 | Failure messages specific, not generic | **MET** — ML-1 |
+| 10 | QA_REPORT records root cause + verification | **MET** — this section |
+
+Four of ten are blocked on a credential I do not have and must not fabricate.
+
+## Verification
+
+| Suite | Result |
+|---|---|
+| ML fixes (qualifier, ambiguity, refusal, labels, leaks) | 24/24 |
+| Query B diagnosis | 21/21 |
+| P1-001 map pills | 59/59 |
+| P1-002 IMD jurisdiction | 20/20 |
+| Full frontend regression | 53/53 |
+| **Total** | **177/177** |
+
+`frontend` build clean (`tsc -b && vite build`). `ML` imports clean; 0 tracebacks
+in the server log. Two test defects were found and fixed **in my own harnesses**
+during this round — an over-broad regex that flagged correct candidate labels,
+and an earlier one that scoped a DOM read to `<main>` where the control does not
+live. Neither was a product bug.
+
+---
+
+# Remediation Round 4 — VS-1 resolved (setup installs voice deps)
+
+| Item | Status |
+|---|---|
+| VS-1 `setup` never installed `voice_service/requirements.txt` | **FIXED** (option A) |
+| Manual / opt-out install path undocumented | **FIXED** (option C, README §3a) |
+| Voice service starts under the shared `.venv` | **PARTIAL** — starts, reports `stt_available: false` |
+
+`setup_project()` now installs both Python requirement files, announces the
+PyTorch download before doing it, and on failure refuses to claim "Setup
+complete". README §3a documents the manual install and how to skip voice with
+just `python-multipart`.
+
+Verified by running the real `setup_project()` source text against stubbed
+installers in a sandbox under the script's real `set -eu`: success path invokes
+all four installers and reports completion; failure path warns three times,
+prints no completion claim, and does not abort setup. **No dependency was
+downloaded to test this.**
+
+### Side effects and limits from this round
+
+- **~1.8 GB of pip cache** (`~/.cache/pip`) was downloaded by a test of mine
+  that I had to kill. No package reached `.venv` (verified: no `whisper`,
+  `torch`, `gtts`, `pyttsx3`; all six pre-existing imports still resolve). The
+  cache is regenerable and was left in place rather than deleted unasked.
+- **Voice is not functional.** `openai-whisper` still needs installing for
+  STT/TTS. The service now starts and reports the truth instead of crashing.
+- **All services are currently down.** They were running under the operator's
+  `./start.sh`, which is no longer attached. Re-run `./start.sh` to restore.
+- **The voice dependencies have not been installed for real.** The A change
+  makes `./start.sh setup` do it; the PyTorch download has not been executed
+  here, so that path is verified by stub only.
+
+### README staleness found, not fixed (out of scope this round)
+
+`README.md` §2–5 no longer match the code, all predating this remediation:
+
+| README says | Reality |
+|---|---|
+| `python -m venv venv` | `start.sh` uses `.venv` |
+| `pip install -r requirements.txt` | no root `requirements.txt`; it is `ML/requirements.txt` |
+| `OPENAI_API_KEY=...` | the provider is OpenRouter: `OPENROUTER_API_KEY` |
+| `uvicorn app.main:app` | the entry point is `ML/main.py` → `main:app` |
+
+`OPENAI_API_KEY` is actively misleading after the provider migration. Not
+rewritten here because it is beyond the requested scope; offered as a follow-up.
+
+---
+
+# Remediation log — automation pass (Steps 0 to 4)
+
+This log is evidence, not a second source of truth. The status of every finding
+is stated once, in its own entry above.
+
+## Step 0 · Safety gate (done first, before any further testing)
+
+**Production-write audit — result: no production write occurred, and none is
+possible from this UI.**
+
+| Evidence | Finding |
+|---|---|
+| `grep -rnE "method:\s*['\"\`](POST\|PUT\|PATCH\|DELETE)" frontend/src` | exactly **2** non-GET calls in the whole frontend |
+| `AIChatWorkspace.tsx:77` | POST → `ML_AGENT_ENDPOINT` = `http://localhost:8000/agent` |
+| `App.tsx:548` | POST → `ML_ROUTE_ENDPOINT` = `http://localhost:8000/route-weather` |
+| `grep -rn "JAVA_API_BASE" frontend/src \| grep -v config/api.ts` | **no matches** — the Java base URL is referenced nowhere outside its own module, and every consumer of those endpoints uses GET |
+| Regression run request tally | 114 requests, all 200 or 503, zero 4xx |
+
+**What was sent to production: nothing.** The only writes the application can
+make go to the local ML service. The earlier `toISOString()` timestamp bug made
+saved-report *keys* collide, which caused duplicate GETs, never a mutation.
+
+**Limit on this claim:** the raw harness logs from those runs were in `/tmp` and
+have since been cleared, so the request tally above comes from the recorded run
+summary, not from a re-inspectable log. The static analysis is current and
+re-verifiable; the historical traffic record is not.
+
+**Change made.** `frontend/src/config/api.ts` no longer hardcodes a deployed
+host. Both base URLs are environment-driven, default to localhost, and a
+non-local host is **refused** unless `VITE_USE_PRODUCTION_API=true` is set
+explicitly. Verified 7/7 by building the real module under seven env
+combinations and asserting the *effective* base URL:
+
+| Configuration | Effective base |
+|---|---|
+| no env | `http://localhost:8080` |
+| explicit localhost | `http://localhost:8080` |
+| `127.0.0.1` | `http://127.0.0.1:8080` |
+| production host, no opt-in | **refused** → `http://localhost:8080` |
+| production host + opt-in | allowed (with a loud warning) |
+| `VITE_USE_PRODUCTION_API=false` | **refused** |
+| trailing slashes | normalised |
+
+**Secret scan:** 0 hits across all files that would be committed, for
+`sk-`/`sk-or-v1-` keys, `AIza`, `ghp_`/`gho_`, AWS keys, JWTs, private-key
+headers, and quoted values assigned to key/token/secret/password/authorization
+names. `.env` is ignored (`.gitignore:26:.env*`). `.serena/`, `.cache/` and
+`frontend/probe-dist/` were **not** ignored and would have been committed; all
+three are now ignored.
+
+**Defect found and fixed in the act of doing this:** the first version of
+`readEnv` read `import.meta.env.VITE_…` unguarded. `import.meta.env` does not
+exist outside Vite, so importing `api.ts` under the Node test runner threw
+`TypeError: Cannot read properties of undefined` and broke
+`tests/radar_core.test.ts` at import time. Fixed with an optional chain, which
+keeps Vite's static replacement (re-verified 7/7).
+
+## Step 1 · OpenRouter key and AI path — BLOCKED
+
+`OPENROUTER_API_KEY` is **not present** in the environment and there is no
+`.env`. Steps 1.1 to 1.4 (smoke test, tool-call verification, 429 backoff,
+20-payload red team) were **not run**. PROMPT-001 stays BLOCKED. No red-team
+result is claimed.
+
+**A blocker found while preparing Step 1:** the operator's plan to put the key
+in `.env` would have silently failed. Nothing called `load_dotenv()`,
+`python-dotenv` was not in `ML/requirements.txt`, and `start.sh` passed no
+`--env-file`, so the key would have been ignored and `/agent` would have
+answered 503 "not configured" — indistinguishable from a wrong key. Fixed:
+`ML/main.py` now loads a project-root or `ML/` `.env` at startup (real
+environment variables still win), and `python-dotenv` was added to
+`ML/requirements.txt`.
+
+Verified with a throwaway `.env` containing a placeholder, then deleted:
+`/health` reported `model_provider_configured: true` and `/agent` returned
+**502** `OpenAIAuthenticationError` rather than 503. That is the intended
+signal: **503 = no key found, 502 = key present but the provider rejected it.**
+
+## Step 2 · Defect fixes
+
+| ID | Change | Verification |
+|---|---|---|
+| P2-004 | Location persisted to `localStorage` (`loadStoredLocation`/`storeLocation`), restored on boot, deep link still wins, `sanitize()` re-validates on read, blocked/corrupt storage is a silent no-op | 6/6 |
+| P2-005 | "Analyze route" disabled until both endpoints are filled; inline `role="status"` hint names exactly which field is missing | 9/9 |
+| P2-006 | Route failures mapped to plain language by status; raw exception, stack and status line go to `console.warn` only | 2/2 |
+| P2-007 | Pill routes to manual search when permission is **denied** (the browser will not re-prompt, so retrying was futile); retries GPS for transient errors; `aria-label` states the action | covered by the P2-004 + P2-009 runs |
+| P3-012 | `min-height: 44px` on `.location-pill`, `.lang-toggle`, `.drawer-close`, `.rail-toggle`, `.drawer-nav-item`, `.chip`, `.map-layer-pill` inside `@media (max-width: 720px)` | 12 measured ≥44px, plus 4/4 viewports in the P1-001 guard |
+| P3-013 | Body scroll locked while the drawer is open, previous `overflow` captured and restored | 2/2 |
+| P3-016 | `fmtSavedAt` renders `HH:MM IST, DD Mon`, the app's existing convention; never emits the raw string | 4/4 |
+| P3-014, P3-015 | **OPEN**, deferred to backlog by decision | not started |
+
+**A gap this pass closed in its own verification:** the P3-012 selector list
+originally omitted `.map-layer-pill`, the actual map layer switcher, which is a
+separate class from `.chip`. The map pills were therefore unmeasured and
+unfixed until the P1-001 regression run exposed them at 33px. They are now
+included and measured.
+
+**Test defects found in my own harnesses (not product bugs):**
+- The P1-001 guard initially reported 28/28 while testing **nothing**: the map
+  toolbar renders only when a location exists, and every pill assertion filtered
+  an empty list, so they passed vacuously. It now seeds a location and fails
+  explicitly when zero pills render.
+- Two assertions demanded 44px pills at 768px and 1440px, where the floor is
+  deliberately touch-scoped. Corrected to assert the compact height off-touch.
+- The P3-016 check would have passed trivially because the saved-record list
+  never rendered. It now seeds a record with a microsecond ISO timestamp
+  (`2026-09-28T06:39:02.123456Z`) and asserts the rendered label.
+
+## Step 3 · Docs and housekeeping
+
+- README §2 uses `.venv` (the name `start.sh` actually looks for) and explains
+  that any other name silently falls back to the system `python3`.
+- README §3 no longer references a root `requirements.txt` that does not exist;
+  it names `ML/requirements.txt` and `voice_service/requirements.txt`.
+- README §4 replaces `OPENAI_API_KEY` (wrong since the provider migration) with
+  `OPENROUTER_API_KEY`, states that the ML service loads the project-root
+  `.env`, and documents the 503-vs-502 distinction.
+- README §5 gives the real entry point: `cd ML && ../.venv/bin/python -m uvicorn main:app`.
+- `pip cache purge` reclaimed **2028.3 MB** (810 files, 1418 directories), the
+  cache left by a test of mine that had to be killed.
+- This report: all 16 findings now carry exactly one current status, rewritten
+  in place. The line-4 summary was corrected to match the body.
+
+## Step 4 · Test coverage
+
+**`mvn -o test` in `backend/`: BUILD SUCCESS.**
+
+```
+Tests run: 140, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Across 20 test classes. No failures to report, and nothing was changed to
+achieve this. Three classes present in the run are **not** listed in the
+repository's documented check table and should be added to it:
+`CorsConfigurationTest`, `LlmQueryUnderstandingServiceTest`,
+`WeatherCoordinateAwareEndpointsTest`.
+
+**Frontend gates added** to `frontend/package.json`:
+
+| Script | Command | Result |
+|---|---|---|
+| `npm run typecheck` | `tsc -b --noEmit` | exit 0 |
+| `npm run lint` | `eslint src` | exit 0, **63 warnings** |
+| `npm test` | `node --test ../tests/*.test.ts` | 21/21 pass |
+| `npm run build` | `tsc -b && vite build` | exit 0 |
+
+`eslint`, `typescript-eslint` and `eslint-plugin-react-hooks` were added as dev
+dependencies with a flat config. The first run reported 66 problems; the two
+real ones are fixed (`no-useless-escape` in `useVoiceOutput.ts`, `prefer-const`
+in `pressureLayer.ts`).
+
+**Disclosed debt, not hidden:** 60 of the 63 remaining warnings are
+`@typescript-eslint/no-explicit-any`, pre-existing across the codebase. They are
+set to `warn` deliberately. Leaving them as `error` would make the gate
+permanently red and therefore ignored, which is worse than no gate. The count
+is stated here so the debt is tracked. The other 3 are
+`react-hooks/exhaustive-deps`, re-enabled as warnings after being switched off.
+
+**Pre-existing test failure found and corrected:** `tests/location_core.test.ts`
+asserted a `sanitize()` result shape that predated the `district` field added for
+IMD bulletins, and `deepStrictEqual` distinguishes a missing key from an
+explicit `undefined`. The expectation was updated to match the intentional type;
+the product code was not changed.
