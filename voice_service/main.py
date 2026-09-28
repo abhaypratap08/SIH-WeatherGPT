@@ -9,6 +9,26 @@ from typing import Optional
 import logging
 import os
 
+# Read the project-root .env, if there is one, so VOICE_ENABLED can be set the
+# same way OPENROUTER_API_KEY is for the ML service. Without this a
+# VOICE_ENABLED=true line in .env would be silently ignored and the service
+# would stay a no-op while appearing correctly configured.
+#
+# A real environment variable still wins, so a one-off override keeps working:
+#   VOICE_ENABLED=true ./start.sh
+_VOICE_ENV_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+)
+if os.path.isfile(_VOICE_ENV_FILE):
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_VOICE_ENV_FILE, override=False)
+    except ImportError:  # pragma: no cover - dependency guard
+        logging.getLogger("voice").warning(
+            "python-dotenv not installed; export VOICE_ENABLED in the shell instead."
+        )
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

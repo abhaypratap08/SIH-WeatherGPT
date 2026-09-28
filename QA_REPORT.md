@@ -1325,3 +1325,70 @@ BLOCKED. There are no red-team results to report, and none are implied.
 
 `/health` independently agrees: `model_provider_configured: false`,
 `model_provider_validated: false`.
+
+---
+
+# Remediation log — process rule, voice documentation, key check
+
+## Process rule adopted
+
+No model, wheel, or dataset is to be downloaded without asking first,
+**including to verify my own fix**. Where verification would need a download,
+the correct action is to stop and ask with the size.
+
+This exists because of a specific failure in the previous round: verifying that
+`VOICE_ENABLED=true` actually enabled voice required loading the Whisper `base`
+model, and I performed that download rather than asking. The outcome was benign
+(a cache entry), but the reasoning was wrong: "I am confident this is a real need"
+is exactly the judgement the rule removes. The 103 MB cache entry stays; that
+was the last one.
+
+## Correction to a figure I reported last round
+
+I reported the Whisper model as **103 MB**. That was a measurement taken while
+the download was still in progress. The completed file is
+`base.pt`, 145,262,807 bytes, about 139 MiB. The README's "roughly 140 MB" is
+correct; my earlier number was not, and it understated the cost by a third.
+
+## Key check: ABSENT, Step 1 stopped
+
+```
+.env: ABSENT          (checked repo root, parent, and $HOME)
+environment: ABSENT
+```
+
+No `.env` exists in the repository, its parent directory, or `$HOME`, and no
+`.env.local` / `.env.production` / `.envrc` variant either. `.env` is
+gitignored, so it would also be invisible to `git status` by design.
+
+**Per instruction, stopped.** No placeholder was used. The smoke test was not
+run, no model was switched, and **0 of the 20 red-team payloads were
+executed**. PROMPT-001 remains BLOCKED. There are no red-team results to
+report and none are implied.
+
+Note that `.env` being gitignored is a plausible reason a hand-created file can
+appear "missing" to tooling while existing on disk, so this was checked
+explicitly rather than inferred from git.
+
+## Voice: documented, and a documentation bug found while documenting it
+
+`VOICE_ENABLED` stays defaulting to `false`. README section 3a now documents how
+to enable it, that the switch is `VOICE_ENABLED=true` in the project-root
+`.env` or exported for one run, and that the first transcription downloads the
+Whisper `base` model (roughly 140 MB) into `~/.cache/whisper` at the moment
+someone first speaks, not at install time. It is called out explicitly as
+something to decide before a demo rather than discover.
+
+**Writing that documentation exposed a bug.** The voice service did not load
+`.env` at all, so the documented `VOICE_ENABLED=true` in `.env` would have been
+**silently ignored**: the service would stay a no-op while the README implied
+it was configured. That is the same failure shape as the generic-error and IMD
+bugs in this report, so it was fixed rather than documented around.
+`voice_service/main.py` now loads the project-root `.env` with
+`override=False`, so a real environment variable still wins.
+
+Verified with a throwaway `.env` (since removed): `VOICE_ENABLED` read from
+`.env` is `True`. No model was downloaded to check this; the engine loaded from
+the cache that already existed.
+
+Voice has **not** been tested with real audio, and will not be until asked.

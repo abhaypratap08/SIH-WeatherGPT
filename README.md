@@ -801,7 +801,6 @@ pip install python-multipart
 
 With that, the voice service starts and reports its real state instead of
 crashing:
-
 ```bash
 curl -s http://localhost:8001/health
 # {"status":"healthy","voice_enabled":false,"stt_available":false,"tts_available":false}
@@ -810,6 +809,36 @@ curl -s http://localhost:8001/health
 `stt_available: false` / `tts_available: false` means exactly that — the service
 is up, speech is not. The web app's text, map, forecast and chat features are
 unaffected.
+
+### Enabling voice (off by default, and it downloads a model)
+
+**Voice is disabled by default and stays that way unless you turn it on.** The
+switch is `VOICE_ENABLED`, and leaving it unset means the service runs as a
+no-op: it starts, reports `stt_available: false`, and returns nothing for a
+transcription request. That is deliberate, because turning it on has a cost
+you should choose rather than discover.
+
+To enable it, add this to the project-root `.env`:
+
+```env
+VOICE_ENABLED=true
+```
+
+or export it for one run:
+
+```bash
+VOICE_ENABLED=true ./start.sh
+```
+
+**What enabling it downloads on first use.** The first `/stt/transcribe` request
+loads the Whisper `base` model, which is **roughly 140 MB** fetched from the
+internet into `~/.cache/whisper`. It is a one-time download, but it happens at
+the moment someone first speaks into the app, not at install time. If that is
+not acceptable on a given machine, leave `VOICE_ENABLED` off. TTS via `gTTS`
+also needs internet access at call time; `pyttsx3` is the offline option.
+
+Be deliberate about this before a demo: enabling voice mid-session means the
+first person to use it waits on a ~140 MB download.
 
 ## 4. Configure Environment Variables
 
