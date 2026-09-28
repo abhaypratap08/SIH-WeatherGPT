@@ -43,6 +43,21 @@ export default function AppHeader({
         ? 'Location unavailable'
         : 'Select a location';
 
+  /**
+   * P2-007: the accessible name must describe what activation WILL do.
+   *
+   * When permission is denied the browser will not prompt again, so the pill
+   * opens the manual search rather than repeating a doomed GPS request. Saying
+   * "Use my location" there would promise an action the control does not
+   * perform, which is the same dead-control problem in a different form.
+   */
+  const pillAction =
+    locationStatus === 'denied'
+      ? 'Search for a location'
+      : locationStatus === 'error'
+        ? 'Retry my location'
+        : 'Use my location';
+
   return (
     <header className="top app-header">
       <button
@@ -60,7 +75,13 @@ export default function AppHeader({
         type="button"
         className="location-pill"
         onClick={onLocationClick}
-        title="Use my location"
+        title={pillAction}
+        /* The visible text is a STATE ("Location unavailable", or the city
+           name), so it is what a screen reader would otherwise announce — it
+           tells the user what happened but not that activating the control
+           does anything. Naming the action is what makes the control usable
+           without sight; the state is still conveyed visually. */
+        aria-label={pillAction}
       >
         <MapPin />
         <span>{pillLabel}</span>

@@ -42,9 +42,11 @@ import {
 } from 'react';
 
 import {
+  loadStoredLocation,
   locationKeyOf,
   parseDeepLink,
   sanitize,
+  storeLocation,
   type LocationSource,
   type SelectedLocation,
 } from './locationCore';
@@ -53,7 +55,7 @@ import {
 export type { LocationSource, SelectedLocation } from './locationCore';
 
 export type LocationPatch = Partial<
-  Pick<SelectedLocation, 'latitude' | 'longitude' | 'name' | 'region' | 'country'>
+  Pick<SelectedLocation, 'latitude' | 'longitude' | 'name' | 'region' | 'district' | 'country'>
 > & { source?: LocationSource };
 
 /**
@@ -113,11 +115,16 @@ interface LocationContextValue {
 const LocationContext = createContext<LocationContextValue | null>(null);
 
 export function LocationProvider({ children }: { children: ReactNode }) {
-  // Init from the URL deep link ONLY. Nothing else may seed the canonical
-  // state: no localStorage read, no default city (§location-architecture).
-  const [location, setLocationState] = useState<SelectedLocation | null>(() => initFromUrl());
+  // Boot priority: a URL deep link wins, then the location the user last chose
+  // (P2-004). Nothing here invents a location: there is still no default city,
+  // and a stored value is re-validated by `sanitize()` on read. Resolved once
+  // so `location` and `status` cannot disagree about what booted.
+  const [bootLocation] = useState<SelectedLocation | null>(
+    () => initFromUrl() ?? loadStoredLocation(),
+  );
+  const [location, setLocationState] = useState<SelectedLocation | null>(bootLocation);
   const [status, setStatus] = useState<LocationState['status']>(
-    () => (initFromUrl() ? 'selected' : 'none'),
+    bootLocation ? 'selected' : 'none',
   );
 
   // Distinguishes the mount-time auto-fill (only fills while nothing was
@@ -194,6 +201,14 @@ export function LocationProvider({ children }: { children: ReactNode }) {
 
   const locationKey = locationKeyOf(location);
 
+  // Mirror the canonical location into localStorage (P2-004) so a refresh does
+  // not throw the selection away. This is a cache of the user's own choice, not
+  // a source of truth: `loadStoredLocation` re-validates on read, and a blocked
+  // or full store is a silent no-op.
+  useEffect(() => {
+    storeLocation(location);
+  }, [location]);
+
   const value = useMemo<LocationContextValue>(
     () => ({ location, state: { status }, locationKey, setLocation, requestGpsLocation }),
     [location, status, locationKey, setLocation, requestGpsLocation],
@@ -214,15 +229,37 @@ export function useLocation(): LocationContextValue {
  * fills in as soon as the lookup returns. Never blocks the UI.
  */
 export async function reverseGeocodeLabel(lat: number, lon: number): Promise<string> {
+  return (await reverseGeocode(lat, lon)).name;
+}
+
+/**
+ * Reverse-geocode a coordinate into the administrative pieces the product
+ * actually needs.
+ *
+ * `name` is a display label only. `district` is the administrative district,
+ * kept SEPARATE because warning bulletins must be labelled with the district
+ * ("Kochi district"), never with a composite display name
+ * ("Kochi, Kerala, India district"). `country` is the resolved country and is
+ * what gates India-only services such as IMD warnings.
+ */
+export async function reverseGeocode(
+  lat: number,
+  lon: number,
+): Promise<{ name: string; district?: string; state?: string; country?: string }> {
   try {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&zoom=10`,
     );
-    if (!res.ok) return 'Selected point';
+    if (!res.ok) return { name: 'Selected point' };
     const d = await res.json();
     const a = d.address ?? {};
-    return a.city ?? a.town ?? a.village ?? a.county ?? d.display_name ?? 'Selected point';
+    return {
+      name: a.city ?? a.town ?? a.village ?? a.county ?? d.display_name ?? 'Selected point',
+      district: a.county ?? a.city_district ?? undefined,
+      state: a.state ?? undefined,
+      country: a.country ?? undefined,
+    };
   } catch {
-    return 'Selected point';
+    return { name: 'Selected point' };
   }
 }
